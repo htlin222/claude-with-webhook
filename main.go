@@ -54,11 +54,22 @@ var (
 func main() {
 	cfg := loadConfig()
 
+	// Resolve repo root: if REPO_ROOT is set use that, otherwise use parent of
+	// the executable's directory (supports webhookd/ layout).
+	root := os.Getenv("REPO_ROOT")
+	if root == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			log.Fatalf("failed to resolve executable path: %v", err)
+		}
+		root = filepath.Dir(filepath.Dir(exe)) // webhookd/../ = repo root
+	}
 	var err error
-	repoRoot, err = filepath.Abs(".")
+	repoRoot, err = filepath.Abs(root)
 	if err != nil {
 		log.Fatalf("failed to resolve repo root: %v", err)
 	}
+	log.Printf("repo root: %s", repoRoot)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/claude-with-webhook/webhook", func(w http.ResponseWriter, r *http.Request) {
