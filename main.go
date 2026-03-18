@@ -328,30 +328,61 @@ func handleIssueOpened(cfg Config, repo, repoDir string, num int, p webhookPaylo
 		return
 	}
 
-	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\nReply **Approve** to start implementation.\nUse **@claude** to ask follow-up questions.", plan)
+	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\n**Approve** to start implementation, or add extra instructions:\n\n```\nApprove\nApprove focus on error handling and add tests\nApprove 請用繁體中文寫註解\n```\n\nUse **@claude** to ask follow-up questions.", plan)
 	if err := postIssueComment(repo, repoDir, num, body); err != nil {
 		log.Printf("error commenting on #%d: %v", num, err)
 	}
 }
 
 func handleIssueComment(cfg Config, repo, repoDir string, num int, p webhookPayload) {
+	log.Printf("[%s#%d] comment from %s (type: %s): %s", repo, num, p.Comment.User.Login, p.Sender.Type, truncateLog(p.Comment.Body, 5))
+
 	if p.Sender.Type == "Bot" {
+		log.Printf("[%s#%d] skipping bot comment", repo, num)
 		return
 	}
 
 	sender := p.Comment.User.Login
 	if !cfg.AllowedUsers[sender] {
+		log.Printf("[%s#%d] skipping non-allowed user %s", repo, num, sender)
 		return
 	}
 
-	body := strings.TrimSpace(strings.ToLower(p.Comment.Body))
+	body := strings.TrimSpace(p.Comment.Body)
+	firstLine := strings.ToLower(strings.SplitN(body, "\n", 2)[0])
+	firstLine = strings.TrimSpace(firstLine)
 
 	switch {
-	case body == "approve" || body == "approved" || body == "lgtm":
-		handleApprove(cfg, repo, repoDir, num, p)
-	case strings.HasPrefix(body, "@claude"):
+	case firstLine == "approve" || firstLine == "approved" || firstLine == "lgtm":
+		// Anything after the first line is extra guidance.
+		extra := ""
+		if idx := strings.Index(body, "\n"); idx != -1 {
+			extra = strings.TrimSpace(body[idx+1:])
+		}
+		if extra != "" {
+			log.Printf("[%s#%d] approve with extra guidance: %s", repo, num, truncateLog(extra, 3))
+		}
+		handleApprove(cfg, repo, repoDir, num, p, extra)
+	case strings.HasPrefix(firstLine, "approve ") || strings.HasPrefix(firstLine, "approved "):
+		// "Approve focus on error handling" → single-line guidance
+		extra := strings.TrimSpace(body[strings.Index(firstLine, " ")+1:])
+		log.Printf("[%s#%d] approve with extra guidance: %s", repo, num, truncateLog(extra, 3))
+		handleApprove(cfg, repo, repoDir, num, p, extra)
+	case strings.HasPrefix(firstLine, "@claude"):
 		handleFollowUp(cfg, repo, repoDir, num, p)
+	default:
+		log.Printf("[%s#%d] unmatched comment: %s", repo, num, truncateLog(body, 2))
 	}
+}
+
+// truncateLog returns the last N lines of s for compact logging.
+func truncateLog(s string, maxLines int) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	if len(lines) <= maxLines {
+		return strings.Join(lines, " | ")
+	}
+	tail := lines[len(lines)-maxLines:]
+	return fmt.Sprintf("...(%d lines) | %s", len(lines), strings.Join(tail, " | "))
 }
 
 func handleFollowUp(cfg Config, repo, repoDir string, num int, p webhookPayload) {
@@ -375,7 +406,7 @@ func handleFollowUp(cfg Config, repo, repoDir string, num int, p webhookPayload)
 	}
 }
 
-func handleApprove(cfg Config, repo, repoDir string, num int, p webhookPayload) {
+func handleApprove(cfg Config, repo, repoDir string, num int, p webhookPayload, extraGuidance string) {
 	log.Printf("[%s] implementing issue #%d", repo, num)
 
 	branch := fmt.Sprintf("issue-%d", num)
@@ -411,6 +442,9 @@ func handleApprove(cfg Config, repo, repoDir string, num int, p webhookPayload) 
 	}
 
 	prompt := fmt.Sprintf("Implement the following GitHub issue. Read the full discussion below carefully, including all comments and follow-up questions, then make all necessary code changes.\n\n%s", discussion)
+	if extraGuidance != "" {
+		prompt += fmt.Sprintf("\n\n## Additional Guidance from Approver\n\nPay special attention to the following instruction — it takes priority over general discussion:\n\n%s", extraGuidance)
+	}
 	if _, err := runCmd(worktreeDir, claudeTimeout, "claude", "-p", "--dangerously-skip-permissions", prompt); err != nil {
 		commentError(repo, repoDir, num, "Claude implementation failed", err)
 		return

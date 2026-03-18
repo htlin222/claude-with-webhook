@@ -48,7 +48,18 @@ curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/rem
 
 ### 核准實作
 
-回覆 **Approve**（或 **lgtm**），Claude 將會：
+回覆 **Approve**（或 **lgtm**）開始實作。可以在同一行或後續行附加額外指示：
+
+```
+Approve
+Approve focus on error handling and add tests
+Approve 請用繁體中文寫註解
+
+LGTM
+用 TypeScript 並保持簡潔
+```
+
+Claude 將會：
 
 1. 從 `origin/main` 建立 git worktree 分支
 2. 實作變更

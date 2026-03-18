@@ -206,3 +206,51 @@ func TestIsDangerousFile(t *testing.T) {
 		})
 	}
 }
+
+func TestTruncateLog(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		max      int
+		contains string
+		notLong  bool // result should be shorter than input
+	}{
+		{
+			name:     "short stays intact",
+			input:    "one line",
+			max:      5,
+			contains: "one line",
+		},
+		{
+			name:     "exactly max lines",
+			input:    "line1\nline2\nline3",
+			max:      3,
+			contains: "line1",
+		},
+		{
+			name:     "truncates to tail",
+			input:    "line1\nline2\nline3\nline4\nline5\nline6\nline7",
+			max:      2,
+			contains: "line6",
+			notLong:  true,
+		},
+		{
+			name:     "truncated shows line count",
+			input:    "a\nb\nc\nd\ne\nf",
+			max:      2,
+			contains: "(6 lines)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := truncateLog(tt.input, tt.max)
+			if !strings.Contains(result, tt.contains) {
+				t.Errorf("expected result to contain %q, got %q", tt.contains, result)
+			}
+			if tt.notLong && len(result) >= len(tt.input) {
+				t.Errorf("expected truncation, but result (%d) >= input (%d)", len(result), len(tt.input))
+			}
+		})
+	}
+}

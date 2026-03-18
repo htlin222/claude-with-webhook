@@ -48,7 +48,18 @@ Comment `@claude <your question>` on the issue. Claude reads the full discussion
 
 ### Approve implementation
 
-Comment exactly **Approve** (or **lgtm**). Claude will:
+Comment **Approve** (or **lgtm**) to start. You can add extra instructions on the same line or as subsequent lines:
+
+```
+Approve
+Approve focus on error handling and add tests
+Approve 請用繁體中文寫註解
+
+LGTM
+use TypeScript and keep it simple
+```
+
+Claude will:
 
 1. Create a git worktree branched from `origin/main`
 2. Implement the changes
