@@ -42,21 +42,16 @@ Start the server:
 
 Open a new issue on any registered repo. Claude will analyze the issue and post a plan as a comment.
 
-### Ask follow-up questions
+### Interact via comments
 
-Comment `@claude <your question>` on the issue. Claude reads the full discussion and responds.
-
-### Approve implementation
-
-Comment **Approve** (or **lgtm**) to start. You can add extra instructions on the same line or as subsequent lines:
+All commands require the `@claude` prefix to prevent accidental triggers:
 
 ```
-Approve
-Approve focus on error handling and add tests
-Approve 請用繁體中文寫註解
-
-LGTM
-use TypeScript and keep it simple
+@claude approve
+@claude approve focus on error handling and add tests
+@claude approve 請用繁體中文寫註解
+@claude lgtm
+@claude <follow-up question>
 ```
 
 Claude will:

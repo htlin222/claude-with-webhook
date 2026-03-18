@@ -24,6 +24,7 @@ import (
 type Config struct {
 	WebhookSecret string
 	AllowedUsers  map[string]bool
+	BotUsername    string            // GitHub username the bot posts as; its own comments are ignored
 	Port          string
 	Repos         map[string]string // "owner/repo" → local path
 	BaseDir       string            // directory where server lives (~/.claude-webhook)
@@ -175,6 +176,7 @@ func loadConfig() Config {
 	return Config{
 		WebhookSecret: secret,
 		AllowedUsers:  allowed,
+		BotUsername:    os.Getenv("BOT_USERNAME"),
 		Port:          port,
 		Repos:         repos,
 		BaseDir:       baseDir,
@@ -323,18 +325,18 @@ func handleIssueOpened(cfg Config, repo, repoDir string, num int, p webhookPaylo
 	log.Printf("[%s] planning for issue #%d: %s", repo, num, p.Issue.Title)
 	reactToIssue(repo, repoDir, num)
 
+	updateComment := postProgressComment(repo, repoDir, num, "🤖 Planning…")
+
 	prompt := fmt.Sprintf("Plan how to implement the following GitHub issue.\n\nTitle: %s\n\nBody:\n%s", p.Issue.Title, p.Issue.Body)
 	log.Printf("[%s#%d] claude started: planning", repo, num)
 	plan, err := runCmd(repoDir, claudeTimeout, "claude", "-p", "--dangerously-skip-permissions", prompt)
 	if err != nil {
-		commentError(repo, repoDir, num, "Failed to generate plan", err)
+		updateComment(formatError("Failed to generate plan", err))
 		return
 	}
 
-	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\n**Approve** to start implementation, or add extra instructions:\n\n```\nApprove\nApprove focus on error handling and add tests\nApprove 請用繁體中文寫註解\n```\n\nUse **@claude** to ask follow-up questions.", plan)
-	if err := postIssueComment(repo, repoDir, num, body); err != nil {
-		log.Printf("error commenting on #%d: %v", num, err)
-	}
+	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\nComment **@claude** to interact:\n\n```\n@claude approve\n@claude approve focus on error handling and add tests\n@claude approve 請用繁體中文寫註解\n@claude <follow-up question>\n```", plan)
+	updateComment(body)
 }
 
 func handleIssueComment(cfg Config, repo, repoDir string, num int, p webhookPayload) {
@@ -346,6 +348,11 @@ func handleIssueComment(cfg Config, repo, repoDir string, num int, p webhookPayl
 	}
 
 	sender := p.Comment.User.Login
+	if cfg.BotUsername != "" && sender == cfg.BotUsername {
+		log.Printf("[%s#%d] skipping own comment", repo, num)
+		return
+	}
+
 	if !cfg.AllowedUsers[sender] {
 		log.Printf("[%s#%d] skipping non-allowed user %s", repo, num, sender)
 		return
@@ -358,8 +365,17 @@ func handleIssueComment(cfg Config, repo, repoDir string, num int, p webhookPayl
 	firstLine := strings.ToLower(strings.SplitN(body, "\n", 2)[0])
 	firstLine = strings.TrimSpace(firstLine)
 
+	// All commands require @claude prefix for safety.
+	if !strings.HasPrefix(firstLine, "@claude") {
+		log.Printf("[%s#%d] ignoring comment without @claude prefix: %s", repo, num, truncateLog(body, 2))
+		return
+	}
+
+	// Strip "@claude" prefix and parse the command.
+	cmd := strings.TrimSpace(strings.TrimPrefix(firstLine, "@claude"))
+
 	switch {
-	case firstLine == "approve" || firstLine == "approved" || firstLine == "lgtm":
+	case cmd == "approve" || cmd == "approved" || cmd == "lgtm":
 		// Anything after the first line is extra guidance.
 		extra := ""
 		if idx := strings.Index(body, "\n"); idx != -1 {
@@ -369,15 +385,15 @@ func handleIssueComment(cfg Config, repo, repoDir string, num int, p webhookPayl
 			log.Printf("[%s#%d] approve with extra guidance: %s", repo, num, truncateLog(extra, 3))
 		}
 		handleApprove(cfg, repo, repoDir, num, p, extra)
-	case strings.HasPrefix(firstLine, "approve ") || strings.HasPrefix(firstLine, "approved "):
-		// "Approve focus on error handling" → single-line guidance
-		extra := strings.TrimSpace(body[strings.Index(firstLine, " ")+1:])
+	case strings.HasPrefix(cmd, "approve ") || strings.HasPrefix(cmd, "approved "):
+		// "@claude approve focus on error handling" → single-line guidance
+		extra := strings.TrimSpace(cmd[strings.Index(cmd, " ")+1:])
 		log.Printf("[%s#%d] approve with extra guidance: %s", repo, num, truncateLog(extra, 3))
 		handleApprove(cfg, repo, repoDir, num, p, extra)
-	case strings.HasPrefix(firstLine, "@claude"):
-		handleFollowUp(cfg, repo, repoDir, num, p)
+	case cmd == "":
+		log.Printf("[%s#%d] ignoring bare @claude mention", repo, num)
 	default:
-		log.Printf("[%s#%d] unmatched comment: %s", repo, num, truncateLog(body, 2))
+		handleFollowUp(cfg, repo, repoDir, num, p)
 	}
 }
 
@@ -394,9 +410,11 @@ func truncateLog(s string, maxLines int) string {
 func handleFollowUp(cfg Config, repo, repoDir string, num int, p webhookPayload) {
 	log.Printf("[%s] follow-up on issue #%d", repo, num)
 
+	updateComment := postProgressComment(repo, repoDir, num, "🤖 Thinking…")
+
 	discussion, err := runCmd(repoDir, gitTimeout, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--comments")
 	if err != nil {
-		commentError(repo, repoDir, num, "Failed to read issue discussion", err)
+		updateComment(formatError("Failed to read issue discussion", err))
 		return
 	}
 
@@ -404,13 +422,11 @@ func handleFollowUp(cfg Config, repo, repoDir string, num int, p webhookPayload)
 	log.Printf("[%s#%d] claude started: follow-up", repo, num)
 	reply, err := runCmd(repoDir, claudeTimeout, "claude", "-p", "--dangerously-skip-permissions", prompt)
 	if err != nil {
-		commentError(repo, repoDir, num, "Claude follow-up failed", err)
+		updateComment(formatError("Claude follow-up failed", err))
 		return
 	}
 
-	if err := postIssueComment(repo, repoDir, num, reply); err != nil {
-		log.Printf("error commenting on #%d: %v", num, err)
-	}
+	updateComment(reply)
 }
 
 func handleApprove(cfg Config, repo, repoDir string, num int, p webhookPayload, extraGuidance string) {
@@ -420,18 +436,20 @@ func handleApprove(cfg Config, repo, repoDir string, num int, p webhookPayload, 
 	worktreeDir := filepath.Join(repoDir, "worktrees", branch)
 
 	// Skip if branch already exists (already processed).
-	if _, err := runCmd(repoDir, gitTimeout, "git", "rev-parse", "--verify", branch); err == nil {
+	if branchExists(repoDir, branch) {
 		log.Printf("branch %s already exists, skipping duplicate approve", branch)
 		return
 	}
 
+	updateComment := postProgressComment(repo, repoDir, num, "🤖 Implementing…")
+
 	if _, err := runCmd(repoDir, gitTimeout, "git", "fetch", "origin", "main"); err != nil {
-		commentError(repo, repoDir, num, "Failed to fetch origin/main", err)
+		updateComment(formatError("Failed to fetch origin/main", err))
 		return
 	}
 
 	if _, err := runCmd(repoDir, gitTimeout, "git", "worktree", "add", worktreeDir, "-b", branch, "origin/main"); err != nil {
-		commentError(repo, repoDir, num, "Failed to create worktree", err)
+		updateComment(formatError("Failed to create worktree", err))
 		return
 	}
 
@@ -444,7 +462,7 @@ func handleApprove(cfg Config, repo, repoDir string, num int, p webhookPayload, 
 
 	discussion, err := runCmd(repoDir, gitTimeout, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--comments")
 	if err != nil {
-		commentError(repo, repoDir, num, "Failed to read issue discussion", err)
+		updateComment(formatError("Failed to read issue discussion", err))
 		return
 	}
 
@@ -454,17 +472,17 @@ func handleApprove(cfg Config, repo, repoDir string, num int, p webhookPayload, 
 	}
 	log.Printf("[%s#%d] claude started: implementing", repo, num)
 	if _, err := runCmd(worktreeDir, claudeTimeout, "claude", "-p", "--dangerously-skip-permissions", prompt); err != nil {
-		commentError(repo, repoDir, num, "Claude implementation failed", err)
+		updateComment(formatError("Claude implementation failed", err))
 		return
 	}
 
 	status, err := runCmd(worktreeDir, gitTimeout, "git", "status", "--porcelain")
 	if err != nil {
-		commentError(repo, repoDir, num, "Failed to check git status", err)
+		updateComment(formatError("Failed to check git status", err))
 		return
 	}
 	if strings.TrimSpace(status) == "" {
-		postIssueComment(repo, repoDir, num, "No changes were made by Claude. Nothing to commit.")
+		updateComment("No changes were made by Claude. Nothing to commit.")
 		return
 	}
 
@@ -474,20 +492,20 @@ func handleApprove(cfg Config, repo, repoDir string, num int, p webhookPayload, 
 	// Filtered git add — skip dangerous files.
 	filesToAdd := filterSafeFiles(status)
 	if len(filesToAdd) == 0 {
-		postIssueComment(repo, repoDir, num, "All changed files were filtered out by security policy. Nothing to commit.")
+		updateComment("All changed files were filtered out by security policy. Nothing to commit.")
 		return
 	}
 	addArgs := append([]string{"add", "--"}, filesToAdd...)
 	if _, err := runCmd(worktreeDir, gitTimeout, "git", addArgs...); err != nil {
-		commentError(repo, repoDir, num, "Failed to stage changes", err)
+		updateComment(formatError("Failed to stage changes", err))
 		return
 	}
 	if _, err := runCmd(worktreeDir, gitTimeout, "git", "commit", "-m", commitMsg); err != nil {
-		commentError(repo, repoDir, num, "Failed to commit", err)
+		updateComment(formatError("Failed to commit", err))
 		return
 	}
 	if _, err := runCmd(worktreeDir, gitTimeout, "git", "push", "-u", "origin", branch); err != nil {
-		commentError(repo, repoDir, num, "Failed to push branch", err)
+		updateComment(formatError("Failed to push branch", err))
 		return
 	}
 
@@ -495,12 +513,12 @@ func handleApprove(cfg Config, repo, repoDir string, num int, p webhookPayload, 
 	prBody := fmt.Sprintf("Closes #%d\n\nImplemented automatically by Claude.", num)
 	prURL, err := runCmd(worktreeDir, gitTimeout, "gh", "pr", "create", "--title", prTitle, "--body", prBody, "--repo", repo)
 	if err != nil {
-		commentError(repo, repoDir, num, "Failed to create PR", err)
+		updateComment(formatError("Failed to create PR", err))
 		return
 	}
 
 	prURL = strings.TrimSpace(prURL)
-	postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s", prURL))
+	updateComment(fmt.Sprintf("PR created: %s", prURL))
 	success = true
 
 	log.Printf("[%s] PR created for issue #%d: %s", repo, num, prURL)
@@ -536,6 +554,15 @@ func runCmd(dir string, timeout time.Duration, name string, args ...string) (str
 	return string(out), nil
 }
 
+// branchExists checks if a git branch exists without noisy logging.
+func branchExists(dir, branch string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", branch)
+	cmd.Dir = dir
+	return cmd.Run() == nil
+}
+
 // verifySignature checks the HMAC-SHA256 signature from GitHub.
 func verifySignature(payload []byte, header, secret string) bool {
 	if !strings.HasPrefix(header, "sha256=") {
@@ -554,6 +581,36 @@ func verifySignature(payload []byte, header, secret string) bool {
 func postIssueComment(repo, repoDir string, num int, body string) error {
 	_, err := runCmd(repoDir, gitTimeout, "gh", "issue", "comment", strconv.Itoa(num), "--repo", repo, "--body", body)
 	return err
+}
+
+// postProgressComment posts a "working on it" placeholder and returns a
+// function that updates that comment with the final body. If the placeholder
+// fails, the updater falls back to posting a new comment.
+func postProgressComment(repo, repoDir string, num int, placeholder string) func(string) {
+	// Create the placeholder comment and capture its ID.
+	out, err := runCmd(repoDir, gitTimeout, "gh", "api",
+		fmt.Sprintf("repos/%s/issues/%d/comments", repo, num),
+		"-f", fmt.Sprintf("body=%s", placeholder),
+		"--jq", ".id")
+	if err != nil {
+		log.Printf("[%s#%d] failed to post progress comment: %v", repo, num, err)
+		// Return a fallback that just posts a new comment.
+		return func(body string) {
+			postIssueComment(repo, repoDir, num, body)
+		}
+	}
+
+	commentID := strings.TrimSpace(out)
+	return func(body string) {
+		_, err := runCmd(repoDir, gitTimeout, "gh", "api",
+			fmt.Sprintf("repos/%s/issues/comments/%s", repo, commentID),
+			"-X", "PATCH",
+			"-f", fmt.Sprintf("body=%s", body))
+		if err != nil {
+			log.Printf("[%s#%d] failed to update comment %s, posting new: %v", repo, num, commentID, err)
+			postIssueComment(repo, repoDir, num, body)
+		}
+	}
 }
 
 // reactToIssue adds an 👀 emoji reaction to an issue.
@@ -577,9 +634,13 @@ func reactToComment(repo, repoDir string, commentID int) {
 // commentError posts a sanitized error message on the issue.
 func commentError(repo, repoDir string, num int, msg string, err error) {
 	log.Printf("error on %s#%d: %s: %v", repo, num, msg, err)
+	postIssueComment(repo, repoDir, num, formatError(msg, err))
+}
+
+// formatError creates a sanitized error message for GitHub comments.
+func formatError(msg string, err error) string {
 	sanitized := sanitizeError(err.Error())
-	body := fmt.Sprintf("**Error**: %s\n\n```\n%s\n```", msg, sanitized)
-	postIssueComment(repo, repoDir, num, body)
+	return fmt.Sprintf("**Error**: %s\n\n```\n%s\n```", msg, sanitized)
 }
 
 // sanitizeError truncates, strips secrets, and redacts paths from error output.
