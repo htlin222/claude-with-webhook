@@ -41,6 +41,10 @@ type webhookPayload struct {
 			Login string `json:"login"`
 		} `json:"user"`
 	} `json:"comment"`
+	Sender struct {
+		Login string `json:"login"`
+		Type  string `json:"type"` // "User" or "Bot"
+	} `json:"sender"`
 	Repository struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`
@@ -219,12 +223,18 @@ func handleIssueOpened(cfg Config, repo string, num int, p webhookPayload) {
 }
 
 func handleIssueComment(cfg Config, repo string, num int, p webhookPayload) {
+	// Ignore bot comments (e.g. our own plan comments contain "Approve" text).
+	if p.Sender.Type == "Bot" {
+		return
+	}
+
 	sender := p.Comment.User.Login
 	if !cfg.AllowedUsers[sender] {
 		return
 	}
 
-	if !strings.Contains(strings.ToLower(p.Comment.Body), "approve") {
+	body := strings.TrimSpace(strings.ToLower(p.Comment.Body))
+	if body != "approve" && body != "approved" && body != "lgtm" {
 		return
 	}
 
@@ -266,8 +276,9 @@ func handleIssueComment(cfg Config, repo string, num int, p webhookPayload) {
 		return
 	}
 
-	// Run Claude to implement.
-	prompt := fmt.Sprintf("Implement the following GitHub issue. Make all necessary code changes.\n\n%s", discussion)
+	// Run Claude to implement — include full discussion so follow-up
+	// questions and context from all comments are visible.
+	prompt := fmt.Sprintf("Implement the following GitHub issue. Read the full discussion below carefully, including all comments and follow-up questions, then make all necessary code changes.\n\n%s", discussion)
 	if _, err := runCmd(worktreeDir, "claude", "-p", "--dangerously-skip-permissions", prompt); err != nil {
 		commentError(repo, num, "Claude implementation failed", err)
 		return
