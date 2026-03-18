@@ -4,15 +4,37 @@
 
 A Go server that automates Claude Code planning and implementation via GitHub issues. When an allowed user opens an issue, Claude generates a plan. On approval, Claude implements the changes in a git worktree and opens a PR.
 
+## Quick Install (for any repo)
+
+```bash
+cd /path/to/your-repo
+curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-install.sh | bash
+```
+
+This one command will:
+- Download and build the server into `webhookd/`
+- Auto-generate `.env` (webhook secret, GitHub user, available port)
+- Add `webhookd/` to `.gitignore`
+- Set up Tailscale Funnel
+- Create the GitHub webhook
+
+Then start it:
+
+```bash
+./webhookd/start
+```
+
 ## Prerequisites
 
 - [Go](https://go.dev/dl/) 1.23+
 - [GitHub CLI](https://cli.github.com/) (`gh`) — authenticated
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`)
 - [Tailscale](https://tailscale.com/download) with Funnel enabled
-- Git
+- Git, jq, openssl
 
-## Installation
+## Manual Installation
+
+If you prefer step-by-step setup or want to develop on this repo directly:
 
 ### 1. Clone the repo
 
@@ -30,26 +52,10 @@ bash install.sh
 This will:
 - Check that all prerequisites are installed
 - Build the server binary
-- Create `.env` from `.env.example` (if `.env` doesn't already exist)
-- Create the `worktrees/` directory
+- Auto-generate `.env` (secret, GitHub user, port)
+- Set up Tailscale Funnel and create the GitHub webhook
 
-### 3. Configure environment variables
-
-Edit `.env` with your values:
-
-```bash
-GITHUB_WEBHOOK_SECRET=your-secret-here
-ALLOWED_USERS=htlin222
-PORT=8080
-```
-
-| Variable | Description |
-|----------|-------------|
-| `GITHUB_WEBHOOK_SECRET` | Secret used to verify webhook payloads from GitHub |
-| `ALLOWED_USERS` | Comma-separated GitHub usernames allowed to trigger automation |
-| `PORT` | Port the server listens on (default: `8080`) |
-
-### 4. Start the server
+### 3. Start the server
 
 ```bash
 ./claude-webhook-server
@@ -62,32 +68,13 @@ curl http://localhost:8080/claude-with-webhook/health
 # {"status":"ok"}
 ```
 
-### 5. Expose via Tailscale Funnel
+## Environment Variables
 
-```bash
-tailscale funnel --bg 8080
-```
-
-Get your public URL:
-
-```bash
-tailscale status --json | jq -r '.Self.DNSName' | sed 's/\.$//'
-```
-
-Your webhook URL will be:
-
-```
-https://<your-tailscale-hostname>/claude-with-webhook/webhook
-```
-
-### 6. Configure the GitHub webhook
-
-1. Go to your repo on GitHub → **Settings** → **Webhooks** → **Add webhook**
-2. **Payload URL**: `https://<your-tailscale-hostname>/claude-with-webhook/webhook`
-3. **Content type**: `application/json`
-4. **Secret**: same value as `GITHUB_WEBHOOK_SECRET` in `.env`
-5. **Events**: select **Issues** and **Issue comments**
-6. Click **Add webhook**
+| Variable | Description |
+|----------|-------------|
+| `GITHUB_WEBHOOK_SECRET` | Secret used to verify webhook payloads from GitHub |
+| `ALLOWED_USERS` | Comma-separated GitHub usernames allowed to trigger automation |
+| `PORT` | Port the server listens on (default: `8080`) |
 
 ## Usage
 
@@ -114,12 +101,14 @@ Reply **Approve** on the issue. Claude will:
 ## Project Structure
 
 ```
-claude-with-webhook/
-├── main.go              # Webhook server (pure stdlib)
-├── go.mod               # Go module (no external deps)
-├── install.sh           # Installer script
-├── .env.example         # Template environment variables
-├── .env                 # Your local config (git-ignored)
-├── worktrees/           # Git worktrees for implementations (git-ignored)
-└── README.md
+your-repo/
+└── webhookd/              # Created by remote installer
+    ├── claude-webhook-server  # Compiled binary
+    ├── main.go                # Webhook server (pure stdlib)
+    ├── go.mod                 # Go module (no external deps)
+    ├── .env                   # Auto-generated config
+    ├── .env.example           # Template
+    ├── worktrees/             # Git worktrees for implementations
+    ├── start                  # Start the server
+    └── stop                   # Stop the server
 ```
