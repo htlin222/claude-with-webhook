@@ -2,26 +2,30 @@
 
 [繁體中文](README.zhtw.md)
 
-A Go server that automates Claude Code planning and implementation via GitHub issues. When an allowed user opens an issue, Claude generates a plan. On approval, Claude implements the changes in a git worktree and opens a PR.
+A Go server that automates Claude Code planning and implementation via GitHub issues. One server handles multiple repos, routed by URL path. When an allowed user opens an issue, Claude generates a plan. On approval, Claude implements the changes in a git worktree and opens a PR.
 
-## Quick Install (for any repo)
+## Quick Install
+
+Run from any repo you want to automate:
 
 ```bash
 cd /path/to/your-repo
 curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-install.sh | bash
 ```
 
-This one command will:
-- Download and build the server into `webhookd/`
-- Auto-generate `.env` (webhook secret, GitHub user, available port)
-- Add `webhookd/` to `.gitignore`
-- Set up Tailscale Funnel
-- Create the GitHub webhook
+This will:
+- Install the server at `~/.claude-webhook/` (shared across all repos)
+- Register the current repo in `repos.conf`
+- Auto-generate `.env` (webhook secret, GitHub user, port)
+- Reuse Tailscale Funnel if already running, or set one up
+- Create the GitHub webhook for this repo
 
-Then start it:
+Add more repos by running the same command from each repo directory.
+
+Start the server:
 
 ```bash
-./webhookd/start
+~/.claude-webhook/start
 ```
 
 ## Prerequisites
@@ -32,83 +36,77 @@ Then start it:
 - [Tailscale](https://tailscale.com/download) with Funnel enabled
 - Git, jq, openssl
 
-## Manual Installation
-
-If you prefer step-by-step setup or want to develop on this repo directly:
-
-### 1. Clone the repo
-
-```bash
-git clone https://github.com/htlin222/claude-with-webhook.git
-cd claude-with-webhook
-```
-
-### 2. Run the installer
-
-```bash
-bash install.sh
-```
-
-This will:
-- Check that all prerequisites are installed
-- Build the server binary
-- Auto-generate `.env` (secret, GitHub user, port)
-- Set up Tailscale Funnel and create the GitHub webhook
-
-### 3. Start the server
-
-```bash
-./claude-webhook-server
-```
-
-Confirm it's running:
-
-```bash
-curl http://localhost:8080/claude-with-webhook/health
-# {"status":"ok"}
-```
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `GITHUB_WEBHOOK_SECRET` | Secret used to verify webhook payloads from GitHub |
-| `ALLOWED_USERS` | Comma-separated GitHub usernames allowed to trigger automation |
-| `PORT` | Port the server listens on (default: `8080`) |
-
 ## Usage
 
 ### Create a plan
 
-Open a new issue on the repo. If your GitHub username is in `ALLOWED_USERS`, Claude will analyze the issue and post a plan as a comment.
+Open a new issue on any registered repo. Claude will analyze the issue and post a plan as a comment.
+
+### Ask follow-up questions
+
+Comment `@claude <your question>` on the issue. Claude reads the full discussion and responds.
 
 ### Approve implementation
 
-Reply **Approve** on the issue. Claude will:
+Comment exactly **Approve** (or **lgtm**). Claude will:
 
 1. Create a git worktree branched from `origin/main`
 2. Implement the changes
 3. Commit, push, and open a PR
 4. Comment on the issue with a link to the PR
 
+## Architecture
+
+```
+~/.claude-webhook/              # Centralized server (one instance)
+├── claude-webhook-server       # Binary
+├── main.go / go.mod            # Source (pure stdlib, no deps)
+├── .env                        # Shared config (secret, users, port)
+├── repos.conf                  # Repo registry
+├── start / stop                # Control scripts
+└── .env.example
+
+repos.conf:
+  htlin222/repo-a=/Users/you/repo-a
+  htlin222/repo-b=/Users/you/repo-b
+```
+
+Worktrees are created inside each repo:
+
+```
+/Users/you/repo-a/
+└── worktrees/
+    └── issue-3/                # Git worktree for issue #3
+```
+
 ## Endpoints
+
+Each registered repo gets its own webhook URL:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/claude-with-webhook/webhook` | GitHub webhook receiver |
-| `GET` | `/claude-with-webhook/health` | Health check |
+| `POST` | `/{owner}/{repo}/webhook` | Webhook receiver for that repo |
+| `GET` | `/{owner}/{repo}/health` | Health check for that repo |
+| `GET` | `/health` | Global health check |
 
-## Project Structure
+## Environment Variables
 
-```
-your-repo/
-└── webhookd/              # Created by remote installer
-    ├── claude-webhook-server  # Compiled binary
-    ├── main.go                # Webhook server (pure stdlib)
-    ├── go.mod                 # Go module (no external deps)
-    ├── .env                   # Auto-generated config
-    ├── .env.example           # Template
-    ├── worktrees/             # Git worktrees for implementations
-    ├── start                  # Start the server
-    └── stop                   # Stop the server
+| Variable | Description |
+|----------|-------------|
+| `GITHUB_WEBHOOK_SECRET` | Shared secret for all repo webhooks |
+| `ALLOWED_USERS` | Comma-separated GitHub usernames allowed to trigger automation |
+| `PORT` | Port the server listens on (default: `8080`) |
+
+## Managing Repos
+
+```bash
+# List registered repos
+cat ~/.claude-webhook/repos.conf
+
+# Add a new repo
+cd /path/to/new-repo
+curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-install.sh | bash
+
+# Restart server to pick up new repos
+~/.claude-webhook/stop && ~/.claude-webhook/start
 ```
