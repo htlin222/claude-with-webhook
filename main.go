@@ -590,7 +590,8 @@ func postProgressComment(repo, repoDir string, num int, placeholder string) func
 	// Create the placeholder comment and capture its ID.
 	out, err := runCmd(repoDir, gitTimeout, "gh", "api",
 		fmt.Sprintf("repos/%s/issues/%d/comments", repo, num),
-		"-f", fmt.Sprintf("body=%s", placeholder),
+		"-X", "POST",
+		"-f", "body="+placeholder,
 		"--jq", ".id")
 	if err != nil {
 		log.Printf("[%s#%d] failed to post progress comment: %v", repo, num, err)
@@ -601,11 +602,12 @@ func postProgressComment(repo, repoDir string, num int, placeholder string) func
 	}
 
 	commentID := strings.TrimSpace(out)
+	log.Printf("[%s#%d] progress comment created: %s", repo, num, commentID)
 	return func(body string) {
 		_, err := runCmd(repoDir, gitTimeout, "gh", "api",
 			fmt.Sprintf("repos/%s/issues/comments/%s", repo, commentID),
 			"-X", "PATCH",
-			"-f", fmt.Sprintf("body=%s", body))
+			"-f", "body="+body)
 		if err != nil {
 			log.Printf("[%s#%d] failed to update comment %s, posting new: %v", repo, num, commentID, err)
 			postIssueComment(repo, repoDir, num, body)
