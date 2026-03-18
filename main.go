@@ -222,6 +222,12 @@ func handleIssueComment(cfg Config, repo string, num int, p webhookPayload) {
 	branch := fmt.Sprintf("issue-%d", num)
 	worktreeDir := filepath.Join(repoRoot, "worktrees", branch)
 
+	// Skip if branch already exists (already processed).
+	if _, err := runCmd(repoRoot, "git", "rev-parse", "--verify", branch); err == nil {
+		log.Printf("branch %s already exists, skipping duplicate approve", branch)
+		return
+	}
+
 	// Fetch latest main.
 	if _, err := runCmd(repoRoot, "git", "fetch", "origin", "main"); err != nil {
 		commentError(repo, num, "Failed to fetch origin/main", err)
