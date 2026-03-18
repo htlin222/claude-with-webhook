@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,9 +14,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Config struct {
@@ -52,10 +55,38 @@ type webhookPayload struct {
 	} `json:"repository"`
 }
 
-var issueMu sync.Map // per-issue mutex keyed by "repo#number"
+const (
+	claudeTimeout = 5 * time.Minute
+	gitTimeout    = 30 * time.Second
+	maxErrorLen   = 500
+)
+
+var (
+	issueMu   sync.Map // per-issue mutex keyed by "repo#number"
+	semaphore chan struct{}
+
+	// Patterns for files that should never be staged.
+	dangerousFilePatterns = []string{
+		".env*", "*.pem", "*.key", "*credential*", "*secret*", "*token*",
+		"node_modules/", ".git/",
+	}
+
+	// Patterns for lines to redact from error output.
+	secretLinePattern = regexp.MustCompile(`(?i)(token|key|secret|password|credential)`)
+	absPathPattern    = regexp.MustCompile(`/Users/[^\s]+`)
+)
 
 func main() {
 	cfg := loadConfig()
+
+	maxConcurrent := 3
+	if v := os.Getenv("MAX_CONCURRENT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxConcurrent = n
+		}
+	}
+	semaphore = make(chan struct{}, maxConcurrent)
+	log.Printf("max concurrent jobs: %d", maxConcurrent)
 
 	mux := http.NewServeMux()
 
@@ -252,6 +283,15 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, cfg Config, repoFromU
 	w.WriteHeader(http.StatusOK)
 
 	go func() {
+		// Concurrency limiter — drop if full.
+		select {
+		case semaphore <- struct{}{}:
+			defer func() { <-semaphore }()
+		default:
+			log.Printf("concurrency limit reached, skipping %s#%d", repo, payload.Issue.Number)
+			return
+		}
+
 		num := payload.Issue.Number
 		lockKey := fmt.Sprintf("%s#%d", repo, num)
 
@@ -282,13 +322,13 @@ func handleIssueOpened(cfg Config, repo, repoDir string, num int, p webhookPaylo
 	log.Printf("[%s] planning for issue #%d: %s", repo, num, p.Issue.Title)
 
 	prompt := fmt.Sprintf("Plan how to implement the following GitHub issue.\n\nTitle: %s\n\nBody:\n%s", p.Issue.Title, p.Issue.Body)
-	plan, err := runCmd(repoDir, "claude", "-p", "--dangerously-skip-permissions", prompt)
+	plan, err := runCmd(repoDir, claudeTimeout, "claude", "-p", "--dangerously-skip-permissions", prompt)
 	if err != nil {
 		commentError(repo, repoDir, num, "Failed to generate plan", err)
 		return
 	}
 
-	body := fmt.Sprintf("## Claude's Plan\n\n%s\n\n---\n\nReply **Approve** to start implementation.\nUse **@claude** to ask follow-up questions.", plan)
+	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\nReply **Approve** to start implementation.\nUse **@claude** to ask follow-up questions.", plan)
 	if err := postIssueComment(repo, repoDir, num, body); err != nil {
 		log.Printf("error commenting on #%d: %v", num, err)
 	}
@@ -317,14 +357,14 @@ func handleIssueComment(cfg Config, repo, repoDir string, num int, p webhookPayl
 func handleFollowUp(cfg Config, repo, repoDir string, num int, p webhookPayload) {
 	log.Printf("[%s] follow-up on issue #%d", repo, num)
 
-	discussion, err := runCmd(repoDir, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--comments")
+	discussion, err := runCmd(repoDir, gitTimeout, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--comments")
 	if err != nil {
 		commentError(repo, repoDir, num, "Failed to read issue discussion", err)
 		return
 	}
 
 	prompt := fmt.Sprintf("You are helping with a GitHub issue. Read the full discussion below, including the original issue and all comments. The latest comment is a follow-up question or request directed at you. Respond helpfully.\n\n%s", discussion)
-	reply, err := runCmd(repoDir, "claude", "-p", "--dangerously-skip-permissions", prompt)
+	reply, err := runCmd(repoDir, claudeTimeout, "claude", "-p", "--dangerously-skip-permissions", prompt)
 	if err != nil {
 		commentError(repo, repoDir, num, "Claude follow-up failed", err)
 		return
@@ -342,17 +382,17 @@ func handleApprove(cfg Config, repo, repoDir string, num int, p webhookPayload) 
 	worktreeDir := filepath.Join(repoDir, "worktrees", branch)
 
 	// Skip if branch already exists (already processed).
-	if _, err := runCmd(repoDir, "git", "rev-parse", "--verify", branch); err == nil {
+	if _, err := runCmd(repoDir, gitTimeout, "git", "rev-parse", "--verify", branch); err == nil {
 		log.Printf("branch %s already exists, skipping duplicate approve", branch)
 		return
 	}
 
-	if _, err := runCmd(repoDir, "git", "fetch", "origin", "main"); err != nil {
+	if _, err := runCmd(repoDir, gitTimeout, "git", "fetch", "origin", "main"); err != nil {
 		commentError(repo, repoDir, num, "Failed to fetch origin/main", err)
 		return
 	}
 
-	if _, err := runCmd(repoDir, "git", "worktree", "add", worktreeDir, "-b", branch, "origin/main"); err != nil {
+	if _, err := runCmd(repoDir, gitTimeout, "git", "worktree", "add", worktreeDir, "-b", branch, "origin/main"); err != nil {
 		commentError(repo, repoDir, num, "Failed to create worktree", err)
 		return
 	}
@@ -364,19 +404,19 @@ func handleApprove(cfg Config, repo, repoDir string, num int, p webhookPayload) 
 		}
 	}()
 
-	discussion, err := runCmd(repoDir, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--comments")
+	discussion, err := runCmd(repoDir, gitTimeout, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--comments")
 	if err != nil {
 		commentError(repo, repoDir, num, "Failed to read issue discussion", err)
 		return
 	}
 
 	prompt := fmt.Sprintf("Implement the following GitHub issue. Read the full discussion below carefully, including all comments and follow-up questions, then make all necessary code changes.\n\n%s", discussion)
-	if _, err := runCmd(worktreeDir, "claude", "-p", "--dangerously-skip-permissions", prompt); err != nil {
+	if _, err := runCmd(worktreeDir, claudeTimeout, "claude", "-p", "--dangerously-skip-permissions", prompt); err != nil {
 		commentError(repo, repoDir, num, "Claude implementation failed", err)
 		return
 	}
 
-	status, err := runCmd(worktreeDir, "git", "status", "--porcelain")
+	status, err := runCmd(worktreeDir, gitTimeout, "git", "status", "--porcelain")
 	if err != nil {
 		commentError(repo, repoDir, num, "Failed to check git status", err)
 		return
@@ -389,22 +429,29 @@ func handleApprove(cfg Config, repo, repoDir string, num int, p webhookPayload) 
 	title := p.Issue.Title
 	commitMsg := fmt.Sprintf("Implement #%d: %s", num, title)
 
-	if _, err := runCmd(worktreeDir, "git", "add", "-A"); err != nil {
+	// Filtered git add — skip dangerous files.
+	filesToAdd := filterSafeFiles(status)
+	if len(filesToAdd) == 0 {
+		postIssueComment(repo, repoDir, num, "All changed files were filtered out by security policy. Nothing to commit.")
+		return
+	}
+	addArgs := append([]string{"add", "--"}, filesToAdd...)
+	if _, err := runCmd(worktreeDir, gitTimeout, "git", addArgs...); err != nil {
 		commentError(repo, repoDir, num, "Failed to stage changes", err)
 		return
 	}
-	if _, err := runCmd(worktreeDir, "git", "commit", "-m", commitMsg); err != nil {
+	if _, err := runCmd(worktreeDir, gitTimeout, "git", "commit", "-m", commitMsg); err != nil {
 		commentError(repo, repoDir, num, "Failed to commit", err)
 		return
 	}
-	if _, err := runCmd(worktreeDir, "git", "push", "-u", "origin", branch); err != nil {
+	if _, err := runCmd(worktreeDir, gitTimeout, "git", "push", "-u", "origin", branch); err != nil {
 		commentError(repo, repoDir, num, "Failed to push branch", err)
 		return
 	}
 
 	prTitle := fmt.Sprintf("Fix #%d: %s", num, title)
 	prBody := fmt.Sprintf("Closes #%d\n\nImplemented automatically by Claude.", num)
-	prURL, err := runCmd(worktreeDir, "gh", "pr", "create", "--title", prTitle, "--body", prBody, "--repo", repo)
+	prURL, err := runCmd(worktreeDir, gitTimeout, "gh", "pr", "create", "--title", prTitle, "--body", prBody, "--repo", repo)
 	if err != nil {
 		commentError(repo, repoDir, num, "Failed to create PR", err)
 		return
@@ -417,12 +464,18 @@ func handleApprove(cfg Config, repo, repoDir string, num int, p webhookPayload) 
 	log.Printf("[%s] PR created for issue #%d: %s", repo, num, prURL)
 }
 
-// runCmd executes a command in the given directory and returns combined output.
-func runCmd(dir, name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+// runCmd executes a command in the given directory with a timeout and returns combined output.
+func runCmd(dir string, timeout time.Duration, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	log.Printf("exec: %s %s (dir: %s)", name, strings.Join(args, " "), dir)
+	log.Printf("exec: %s %s (dir: %s, timeout: %s)", name, strings.Join(args, " "), dir, timeout)
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return string(out), fmt.Errorf("%s %s: timed out after %s", name, strings.Join(args, " "), timeout)
+	}
 	if err != nil {
 		return string(out), fmt.Errorf("%s %s: %w\n%s", name, strings.Join(args, " "), err, out)
 	}
@@ -445,20 +498,89 @@ func verifySignature(payload []byte, header, secret string) bool {
 
 // postIssueComment posts a comment on a GitHub issue using gh CLI.
 func postIssueComment(repo, repoDir string, num int, body string) error {
-	_, err := runCmd(repoDir, "gh", "issue", "comment", strconv.Itoa(num), "--repo", repo, "--body", body)
+	_, err := runCmd(repoDir, gitTimeout, "gh", "issue", "comment", strconv.Itoa(num), "--repo", repo, "--body", body)
 	return err
 }
 
-// commentError posts an error message on the issue.
+// commentError posts a sanitized error message on the issue.
 func commentError(repo, repoDir string, num int, msg string, err error) {
 	log.Printf("error on %s#%d: %s: %v", repo, num, msg, err)
-	body := fmt.Sprintf("**Error**: %s\n\n```\n%v\n```", msg, err)
+	sanitized := sanitizeError(err.Error())
+	body := fmt.Sprintf("**Error**: %s\n\n```\n%s\n```", msg, sanitized)
 	postIssueComment(repo, repoDir, num, body)
+}
+
+// sanitizeError truncates, strips secrets, and redacts paths from error output.
+func sanitizeError(s string) string {
+	// Strip lines containing secret-like keywords.
+	var lines []string
+	for _, line := range strings.Split(s, "\n") {
+		if !secretLinePattern.MatchString(line) {
+			lines = append(lines, line)
+		}
+	}
+	s = strings.Join(lines, "\n")
+
+	// Redact absolute file paths.
+	s = absPathPattern.ReplaceAllString(s, "<redacted-path>/")
+
+	// Truncate.
+	if len(s) > maxErrorLen {
+		s = s[:maxErrorLen] + "\n... (truncated)"
+	}
+	return s
 }
 
 // cleanupWorktree removes a worktree and its branch.
 func cleanupWorktree(repoDir, dir, branch string) {
 	log.Printf("cleaning up worktree %s", dir)
-	runCmd(repoDir, "git", "worktree", "remove", "--force", dir)
-	runCmd(repoDir, "git", "branch", "-D", branch)
+	runCmd(repoDir, gitTimeout, "git", "worktree", "remove", "--force", dir)
+	runCmd(repoDir, gitTimeout, "git", "branch", "-D", branch)
+}
+
+// filterSafeFiles parses `git status --porcelain` output and returns files safe to stage.
+func filterSafeFiles(porcelain string) []string {
+	var safe []string
+	for _, line := range strings.Split(porcelain, "\n") {
+		// Porcelain format: "XY filename" — XY is exactly 2 chars, then a space.
+		// Lines are NOT trimmed because leading spaces are meaningful status chars.
+		if len(line) < 4 {
+			continue
+		}
+		file := line[3:]
+		if idx := strings.Index(file, " -> "); idx != -1 {
+			file = file[idx+4:]
+		}
+		file = strings.TrimSpace(file)
+
+		if file == "" {
+			continue
+		}
+		if isDangerousFile(file) {
+			log.Printf("WARNING: skipping dangerous file: %s", file)
+			continue
+		}
+		safe = append(safe, file)
+	}
+	return safe
+}
+
+// isDangerousFile checks if a file matches any dangerous pattern.
+func isDangerousFile(file string) bool {
+	base := filepath.Base(file)
+	for _, pattern := range dangerousFilePatterns {
+		// Directory prefix match.
+		if strings.HasSuffix(pattern, "/") && strings.HasPrefix(file, pattern) {
+			return true
+		}
+		// Glob match against base name.
+		if matched, _ := filepath.Match(pattern, base); matched {
+			return true
+		}
+		// Glob match against full path.
+		if matched, _ := filepath.Match(pattern, file); matched {
+			return true
+		}
+	}
+	return false
 }

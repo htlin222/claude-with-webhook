@@ -96,6 +96,17 @@ Each registered repo gets its own webhook URL:
 | `GITHUB_WEBHOOK_SECRET` | Shared secret for all repo webhooks |
 | `ALLOWED_USERS` | Comma-separated GitHub usernames allowed to trigger automation |
 | `PORT` | Port the server listens on (default: `8080`) |
+| `MAX_CONCURRENT` | Max concurrent jobs (default: `3`) |
+
+## Security
+
+The server includes several hardening measures:
+
+- **Command timeouts** — Claude commands: 5 min, git/gh commands: 30 sec (via `context.WithTimeout`)
+- **Concurrency limit** — Max 3 concurrent jobs (configurable via `MAX_CONCURRENT`); excess requests are dropped with a log warning
+- **Error sanitization** — Error comments posted to GitHub are truncated to 500 chars, lines containing secret keywords (`token`, `key`, `secret`, `password`, `credential`) are stripped, and absolute file paths are redacted
+- **Filtered git add** — Files matching dangerous patterns (`.env*`, `*.pem`, `*.key`, `*credential*`, `*secret*`, `*token*`, `node_modules/`, `.git/`) are never staged or committed
+- **Worktree isolation** — All implementations run in isolated git worktrees, not the main checkout
 
 ## Managing Repos
 
