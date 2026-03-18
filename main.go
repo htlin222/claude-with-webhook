@@ -41,6 +41,7 @@ type webhookPayload struct {
 		} `json:"user"`
 	} `json:"issue"`
 	Comment struct {
+		ID   int    `json:"id"`
 		Body string `json:"body"`
 		User struct {
 			Login string `json:"login"`
@@ -320,8 +321,10 @@ func handleIssueOpened(cfg Config, repo, repoDir string, num int, p webhookPaylo
 	}
 
 	log.Printf("[%s] planning for issue #%d: %s", repo, num, p.Issue.Title)
+	reactToIssue(repo, repoDir, num)
 
 	prompt := fmt.Sprintf("Plan how to implement the following GitHub issue.\n\nTitle: %s\n\nBody:\n%s", p.Issue.Title, p.Issue.Body)
+	log.Printf("[%s#%d] claude started: planning", repo, num)
 	plan, err := runCmd(repoDir, claudeTimeout, "claude", "-p", "--dangerously-skip-permissions", prompt)
 	if err != nil {
 		commentError(repo, repoDir, num, "Failed to generate plan", err)
@@ -347,6 +350,9 @@ func handleIssueComment(cfg Config, repo, repoDir string, num int, p webhookPayl
 		log.Printf("[%s#%d] skipping non-allowed user %s", repo, num, sender)
 		return
 	}
+
+	// Acknowledge the comment with 👀.
+	reactToComment(repo, repoDir, p.Comment.ID)
 
 	body := strings.TrimSpace(p.Comment.Body)
 	firstLine := strings.ToLower(strings.SplitN(body, "\n", 2)[0])
@@ -395,6 +401,7 @@ func handleFollowUp(cfg Config, repo, repoDir string, num int, p webhookPayload)
 	}
 
 	prompt := fmt.Sprintf("You are helping with a GitHub issue. Read the full discussion below, including the original issue and all comments. The latest comment is a follow-up question or request directed at you. Respond helpfully.\n\n%s", discussion)
+	log.Printf("[%s#%d] claude started: follow-up", repo, num)
 	reply, err := runCmd(repoDir, claudeTimeout, "claude", "-p", "--dangerously-skip-permissions", prompt)
 	if err != nil {
 		commentError(repo, repoDir, num, "Claude follow-up failed", err)
@@ -445,6 +452,7 @@ func handleApprove(cfg Config, repo, repoDir string, num int, p webhookPayload, 
 	if extraGuidance != "" {
 		prompt += fmt.Sprintf("\n\n## Additional Guidance from Approver\n\nPay special attention to the following instruction — it takes priority over general discussion:\n\n%s", extraGuidance)
 	}
+	log.Printf("[%s#%d] claude started: implementing", repo, num)
 	if _, err := runCmd(worktreeDir, claudeTimeout, "claude", "-p", "--dangerously-skip-permissions", prompt); err != nil {
 		commentError(repo, repoDir, num, "Claude implementation failed", err)
 		return
@@ -505,13 +513,25 @@ func runCmd(dir string, timeout time.Duration, name string, args ...string) (str
 
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	log.Printf("exec: %s %s (dir: %s, timeout: %s)", name, strings.Join(args, " "), dir, timeout)
+	start := time.Now()
 	out, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+
+	label := name
+	if len(args) > 0 {
+		label += " " + args[0]
+	}
+
 	if ctx.Err() == context.DeadlineExceeded {
+		log.Printf("TIMEOUT: %s after %s", label, timeout)
 		return string(out), fmt.Errorf("%s %s: timed out after %s", name, strings.Join(args, " "), timeout)
 	}
 	if err != nil {
+		log.Printf("FAIL: %s (%s)", label, elapsed.Round(time.Millisecond))
 		return string(out), fmt.Errorf("%s %s: %w\n%s", name, strings.Join(args, " "), err, out)
+	}
+	if elapsed > 5*time.Second {
+		log.Printf("  %s done (%s)", label, elapsed.Round(time.Millisecond))
 	}
 	return string(out), nil
 }
@@ -534,6 +554,24 @@ func verifySignature(payload []byte, header, secret string) bool {
 func postIssueComment(repo, repoDir string, num int, body string) error {
 	_, err := runCmd(repoDir, gitTimeout, "gh", "issue", "comment", strconv.Itoa(num), "--repo", repo, "--body", body)
 	return err
+}
+
+// reactToIssue adds an 👀 emoji reaction to an issue.
+func reactToIssue(repo, repoDir string, num int) {
+	endpoint := fmt.Sprintf("repos/%s/issues/%d/reactions", repo, num)
+	_, err := runCmd(repoDir, gitTimeout, "gh", "api", endpoint, "-f", "content=eyes")
+	if err != nil {
+		log.Printf("failed to react to issue #%d: %v", num, err)
+	}
+}
+
+// reactToComment adds an 👀 emoji reaction to a comment.
+func reactToComment(repo, repoDir string, commentID int) {
+	endpoint := fmt.Sprintf("repos/%s/issues/comments/%d/reactions", repo, commentID)
+	_, err := runCmd(repoDir, gitTimeout, "gh", "api", endpoint, "-f", "content=eyes")
+	if err != nil {
+		log.Printf("failed to react to comment %d: %v", commentID, err)
+	}
 }
 
 // commentError posts a sanitized error message on the issue.
