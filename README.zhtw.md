@@ -132,3 +132,15 @@ curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/rem
 # 重啟伺服器以套用變更
 ~/.claude-webhook/stop && ~/.claude-webhook/start
 ```
+
+**建議：** 在 shell 設定檔（`~/.zshrc` 或 `~/.bashrc`）中加入別名：
+
+```bash
+alias cwh-register='curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-install.sh | bash'
+alias cwh-unregister='curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-uninstall.sh | bash'
+alias cwh-start='~/.claude-webhook/start'
+alias cwh-stop='~/.claude-webhook/stop'
+alias cwh-repos='cat ~/.claude-webhook/repos.conf'
+```
+
+之後只需 `cd /path/to/repo && cwh-register` 即可。

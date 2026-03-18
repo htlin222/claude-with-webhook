@@ -136,3 +136,15 @@ curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/rem
 # Restart server to apply changes
 ~/.claude-webhook/stop && ~/.claude-webhook/start
 ```
+
+**Tip:** Add aliases to your shell config (`~/.zshrc` or `~/.bashrc`):
+
+```bash
+alias cwh-register='curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-install.sh | bash'
+alias cwh-unregister='curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-uninstall.sh | bash'
+alias cwh-start='~/.claude-webhook/start'
+alias cwh-stop='~/.claude-webhook/stop'
+alias cwh-repos='cat ~/.claude-webhook/repos.conf'
+```
+
+Then just `cd /path/to/repo && cwh-register`.
