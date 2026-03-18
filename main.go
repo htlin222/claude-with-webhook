@@ -234,10 +234,39 @@ func handleIssueComment(cfg Config, repo string, num int, p webhookPayload) {
 	}
 
 	body := strings.TrimSpace(strings.ToLower(p.Comment.Body))
-	if body != "approve" && body != "approved" && body != "lgtm" {
+
+	// Exact "approve" → implement. "@claude ..." → follow-up. Otherwise ignore.
+	switch {
+	case body == "approve" || body == "approved" || body == "lgtm":
+		handleApprove(cfg, repo, num, p)
+	case strings.HasPrefix(body, "@claude"):
+		handleFollowUp(cfg, repo, num, p)
+	}
+}
+
+func handleFollowUp(cfg Config, repo string, num int, p webhookPayload) {
+	log.Printf("follow-up on issue #%d", num)
+
+	// Get full issue discussion.
+	discussion, err := runCmd(repoRoot, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--comments")
+	if err != nil {
+		commentError(repo, num, "Failed to read issue discussion", err)
 		return
 	}
 
+	prompt := fmt.Sprintf("You are helping with a GitHub issue. Read the full discussion below, including the original issue and all comments. The latest comment is a follow-up question or request directed at you. Respond helpfully.\n\n%s", discussion)
+	reply, err := runCmd(repoRoot, "claude", "-p", "--dangerously-skip-permissions", prompt)
+	if err != nil {
+		commentError(repo, num, "Claude follow-up failed", err)
+		return
+	}
+
+	if err := postIssueComment(repo, num, reply); err != nil {
+		log.Printf("error commenting on #%d: %v", num, err)
+	}
+}
+
+func handleApprove(cfg Config, repo string, num int, p webhookPayload) {
 	log.Printf("implementing issue #%d", num)
 
 	branch := fmt.Sprintf("issue-%d", num)
