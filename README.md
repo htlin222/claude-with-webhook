@@ -1,5 +1,7 @@
 # Claude Code Webhook Server
 
+[繁體中文](README.zhtw.md)
+
 A Go server that automates Claude Code planning and implementation via GitHub issues. When an allowed user opens an issue, Claude generates a plan. On approval, Claude implements the changes in a git worktree and opens a PR.
 
 ## Prerequisites
