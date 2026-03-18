@@ -129,6 +129,10 @@ cat ~/.claude-webhook/repos.conf
 cd /path/to/new-repo
 curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-install.sh | bash
 
-# Restart server to pick up new repos
+# Remove a repo (deletes webhook, removes from repos.conf)
+cd /path/to/repo-to-remove
+curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-uninstall.sh | bash
+
+# Restart server to apply changes
 ~/.claude-webhook/stop && ~/.claude-webhook/start
 ```
