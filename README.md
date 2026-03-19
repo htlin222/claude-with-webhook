@@ -101,6 +101,7 @@ Each registered repo gets its own webhook URL:
 |----------|-------------|
 | `GITHUB_WEBHOOK_SECRET` | Shared secret for all repo webhooks |
 | `ALLOWED_USERS` | Comma-separated GitHub usernames allowed to trigger automation |
+| `BOT_USERNAME` | GitHub username of the bot; its own comments are filtered out to avoid self-triggering |
 | `PORT` | Port the server listens on (default: `8080`) |
 | `MAX_CONCURRENT` | Max concurrent jobs (default: `3`) |
 
