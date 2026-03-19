@@ -169,7 +169,7 @@ Each registered repo gets its own webhook URL:
 
 The server includes several hardening measures:
 
-- **Command timeouts** — Claude commands: 5 min, git/gh commands: 30 sec (via `context.WithTimeout`)
+- **Command timeouts** — Planning: 10 min, follow-up: 5 min, implementation: 30 min, git/gh commands: 30 sec (via `context.WithTimeout`)
 - **Concurrency limit** — Max 3 concurrent jobs (configurable via `MAX_CONCURRENT`); excess requests are dropped with a log warning
 - **Error sanitization** — Error comments posted to GitHub are truncated to 500 chars, lines containing secret keywords (`token`, `key`, `secret`, `password`, `credential`) are stripped, and absolute file paths are redacted
 - **Filtered git add** — Files matching dangerous patterns (`.env*`, `*.pem`, `*.key`, `*credential*`, `*secret*`, `*token*`, `node_modules/`, `.git/`) are never staged or committed

@@ -169,7 +169,7 @@ Worktrees 建立在各 repo 內部：
 
 伺服器包含多項安全強化措施：
 
-- **指令逾時** — Claude 指令：5 分鐘，git/gh 指令：30 秒（透過 `context.WithTimeout`）
+- **指令逾時** — 規劃：10 分鐘，追問：5 分鐘，實作：30 分鐘，git/gh 指令：30 秒（透過 `context.WithTimeout`）
 - **並行限制** — 最多同時處理 3 個任務（可透過 `MAX_CONCURRENT` 設定）；超出時丟棄並記錄警告
 - **錯誤清洗** — 發布到 GitHub 的錯誤留言會截斷至 500 字元，含有敏感關鍵字（`token`、`key`、`secret`、`password`、`credential`）的行會被移除，絕對路徑會被遮蔽
 - **過濾式 git add** — 符合危險模式的檔案（`.env*`、`*.pem`、`*.key`、`*credential*`、`*secret*`、`*token*`、`node_modules/`、`.git/`）永遠不會被暫存或提交

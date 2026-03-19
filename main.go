@@ -129,9 +129,11 @@ type streamResult struct {
 }
 
 const (
-	claudeTimeout = 5 * time.Minute
-	gitTimeout    = 30 * time.Second
-	maxErrorLen   = 500
+	planTimeout     = 10 * time.Minute
+	followUpTimeout = 5 * time.Minute
+	implementTimeout = 30 * time.Minute
+	gitTimeout      = 30 * time.Second
+	maxErrorLen     = 500
 )
 
 var (
@@ -444,7 +446,7 @@ func runPlan(repo, repoDir string, num int, title, issueBody string) {
 
 	prompt := fmt.Sprintf("Plan how to implement the following GitHub issue.\n\nTitle: %s\n\nBody:\n%s", title, issueBody)
 	log.Printf("[%s#%d] claude started: planning", repo, num)
-	result, err := runClaudeStreaming(repoDir, claudeTimeout, func(partial string, elapsed int) {
+	result, err := runClaudeStreaming(repoDir, planTimeout, func(partial string, elapsed int) {
 		updateComment(progressBody("Planning", partial, elapsed))
 	}, prompt)
 	if err != nil {
@@ -539,7 +541,7 @@ func handleFollowUp(cfg *Config, repo, repoDir string, num int, p webhookPayload
 
 	prompt := fmt.Sprintf("You are helping with a GitHub issue. Read the full discussion below, including the original issue and all comments. The latest comment is a follow-up question or request directed at you. Respond helpfully.\n\n%s", discussion)
 	log.Printf("[%s#%d] claude started: follow-up", repo, num)
-	result, err := runClaudeStreaming(repoDir, claudeTimeout, func(partial string, elapsed int) {
+	result, err := runClaudeStreaming(repoDir, followUpTimeout, func(partial string, elapsed int) {
 		updateComment(progressBody("Thinking", partial, elapsed))
 	}, prompt)
 	if err != nil {
@@ -592,7 +594,7 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 		prompt += fmt.Sprintf("\n\n## Additional Guidance from Approver\n\nPay special attention to the following instruction — it takes priority over general discussion:\n\n%s", extraGuidance)
 	}
 	log.Printf("[%s#%d] claude started: implementing", repo, num)
-	result, err := runClaudeStreaming(worktreeDir, claudeTimeout, func(partial string, elapsed int) {
+	result, err := runClaudeStreaming(worktreeDir, implementTimeout, func(partial string, elapsed int) {
 		updateComment(progressBody("Implementing", partial, elapsed))
 	}, prompt)
 	if err != nil {
