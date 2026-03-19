@@ -3,7 +3,7 @@ BUILD    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS  := -X main.version=$(VERSION) -X main.buildTime=$(BUILD)
 INSTALL  := $(HOME)/.claude-webhook
 
-.PHONY: build install clean restart
+.PHONY: build install uninstall clean restart
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o claude-webhook-server .
@@ -39,6 +39,11 @@ restart: install
 	@$(INSTALL)/stop 2>/dev/null || true
 	@$(INSTALL)/start &
 	@echo "Server restarted."
+
+uninstall:
+	@$(INSTALL)/stop 2>/dev/null || true
+	@rm -rf $(INSTALL)
+	@echo "Removed $(INSTALL)"
 
 clean:
 	@rm -f claude-webhook-server
