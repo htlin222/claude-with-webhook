@@ -4,6 +4,24 @@
 
 A Go server that automates Claude Code planning and implementation via GitHub issues. One server handles multiple repos, routed by URL path. When an allowed user opens an issue, Claude generates a plan. On approval, Claude implements the changes in a git worktree and opens a PR.
 
+## Scenario
+
+A team is debating how to refactor the authentication module. Five people leave comments on the issue — one wants OAuth, another prefers JWT, someone raises concerns about backward compatibility, the PM clarifies the deadline, and a junior dev asks what "middleware" means.
+
+Normally, the tech lead reads all of this, writes a summary, drafts a plan, codes the solution, writes tests, opens a PR, and asks for review. That's half a day gone.
+
+With this project, the tech lead types one comment:
+
+> `@claude approve please gather everyone's opinions from this discussion, find the approach that satisfies the security concerns and the deadline, and implement it with tests`
+
+Then goes to lunch.
+
+By the time they're back, there's a PR waiting — code written, tests passing, every team member's concern addressed in the implementation. The tech lead reviews the diff, clicks merge, and moves on.
+
+**The new workflow:** Humans discuss. Humans decide. The agent does the rest.
+
+The only irreplaceable part is the conversation — the ideas, the tradeoffs, the domain knowledge that lives in people's heads. Everything after that — summarizing, planning, coding, testing, opening PRs — is execution. And execution is what agents are for.
+
 ## Why not [Claude Code GitHub Actions](https://code.claude.com/docs/en/github-actions)?
 
 Anthropic offers an official GitHub Actions integration ([`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action)). It's a solid product. But it didn't fit our workflow, so we built this instead.

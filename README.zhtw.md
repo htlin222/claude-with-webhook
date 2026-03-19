@@ -4,6 +4,24 @@
 
 一個用 Go 撰寫的伺服器，透過 GitHub Issues 自動化 Claude Code 的規劃與實作流程。單一伺服器可處理多個 repo，透過 URL 路徑路由。當允許的使用者開啟 Issue 時，Claude 會自動產生計畫；經核准後，Claude 會在 git worktree 中實作變更並開啟 PR。
 
+## 使用情境
+
+團隊正在討論如何重構認證模組。五個人在 Issue 上留言 — 一個想用 OAuth，另一個偏好 JWT，有人提出向後相容的顧慮，PM 釐清了截止日期，一位 junior 工程師問「middleware 是什麼意思」。
+
+通常，技術主管要讀完所有討論、寫出摘要、擬定計畫、寫程式碼、寫測試、開 PR、請人 review。半天就沒了。
+
+有了這個專案，技術主管只需要打一行留言：
+
+> `@claude approve 請彙整這個討論中每個人的意見，找出同時滿足安全性考量和截止日期的方案，並且實作含測試`
+
+然後去吃午餐。
+
+回來的時候，PR 已經在等了 — 程式碼寫好、測試通過、每位團隊成員的意見都反映在實作中。技術主管看看 diff，按下 merge，繼續下一件事。
+
+**新的工作流程：** 人類討論。人類決策。Agent 執行剩下的一切。
+
+唯一不可替代的是對話本身 — 點子、取捨、存在於每個人腦中的領域知識。之後的所有事情 — 整理、規劃、寫程式、測試、開 PR — 都是執行。而執行，正是 agent 的工作。
+
 ## 為什麼不用 [Claude Code GitHub Actions](https://code.claude.com/docs/en/github-actions)？
 
 Anthropic 提供了官方的 GitHub Actions 整合（[`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action)）。它是個很好的產品，但不適合我們的工作流程，所以自己造了一個。
