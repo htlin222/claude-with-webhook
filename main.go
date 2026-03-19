@@ -93,6 +93,12 @@ type webhookPayload struct {
 	} `json:"repository"`
 }
 
+// Build-time variables, set via -ldflags.
+var (
+	version   = "dev"
+	buildTime = "unknown"
+)
+
 // Stream event types for claude --output-format stream-json
 type streamEvent struct {
 	Type         string         `json:"type"`
@@ -145,6 +151,7 @@ var (
 
 func main() {
 	cfg := loadConfig()
+	log.Printf("claude-webhook-server %s (built %s)", version, buildTime)
 
 	maxConcurrent := 3
 	if v := os.Getenv("MAX_CONCURRENT"); v != "" {
@@ -171,6 +178,15 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	// Version endpoint.
+	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"version":    version,
+			"build_time": buildTime,
+		})
 	})
 
 	// Catch-all handler for /{owner}/{repo}/webhook routes.
@@ -428,8 +444,8 @@ func runPlan(repo, repoDir string, num int, title, issueBody string) {
 
 	prompt := fmt.Sprintf("Plan how to implement the following GitHub issue.\n\nTitle: %s\n\nBody:\n%s", title, issueBody)
 	log.Printf("[%s#%d] claude started: planning", repo, num)
-	result, err := runClaudeStreaming(repoDir, claudeTimeout, func(partial string) {
-		updateComment("🤖 Planning…\n\n" + partial + "\n\n*⏳ Still working…*")
+	result, err := runClaudeStreaming(repoDir, claudeTimeout, func(partial string, elapsed int) {
+		updateComment(progressBody("Planning", partial, elapsed))
 	}, prompt)
 	if err != nil {
 		updateComment(formatError("Failed to generate plan", err))
@@ -523,8 +539,8 @@ func handleFollowUp(cfg *Config, repo, repoDir string, num int, p webhookPayload
 
 	prompt := fmt.Sprintf("You are helping with a GitHub issue. Read the full discussion below, including the original issue and all comments. The latest comment is a follow-up question or request directed at you. Respond helpfully.\n\n%s", discussion)
 	log.Printf("[%s#%d] claude started: follow-up", repo, num)
-	result, err := runClaudeStreaming(repoDir, claudeTimeout, func(partial string) {
-		updateComment("🤖 Thinking…\n\n" + partial + "\n\n*⏳ Still working…*")
+	result, err := runClaudeStreaming(repoDir, claudeTimeout, func(partial string, elapsed int) {
+		updateComment(progressBody("Thinking", partial, elapsed))
 	}, prompt)
 	if err != nil {
 		updateComment(formatError("Claude follow-up failed", err))
@@ -576,8 +592,8 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 		prompt += fmt.Sprintf("\n\n## Additional Guidance from Approver\n\nPay special attention to the following instruction — it takes priority over general discussion:\n\n%s", extraGuidance)
 	}
 	log.Printf("[%s#%d] claude started: implementing", repo, num)
-	result, err := runClaudeStreaming(worktreeDir, claudeTimeout, func(partial string) {
-		updateComment("🤖 Implementing…\n\n" + partial + "\n\n*⏳ Still working…*")
+	result, err := runClaudeStreaming(worktreeDir, claudeTimeout, func(partial string, elapsed int) {
+		updateComment(progressBody("Implementing", partial, elapsed))
 	}, prompt)
 	if err != nil {
 		updateComment(formatError("Claude implementation failed", err))
@@ -695,8 +711,8 @@ func runCmd(dir string, timeout time.Duration, name string, args ...string) (str
 }
 
 // runClaudeStreaming runs claude with stream-json output, calling onUpdate periodically
-// with accumulated text so callers can show live progress.
-func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(string), prompt string) (*streamResult, error) {
+// with accumulated text and elapsed seconds so callers can show live progress.
+func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(partial string, elapsed int), prompt string) (*streamResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -716,12 +732,33 @@ func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(string)
 	}
 
 	var accumulated strings.Builder
+	var accMu sync.Mutex
 	var res streamResult
-	lastUpdate := time.Now()
-	firstUpdate := true
-	const firstUpdateInterval = 2 * time.Second  // show partial text quickly
-	const updateInterval = 5 * time.Second        // then throttle to avoid rate limits
 	const maxCommentLen = 60000 // GitHub limit is 65536, leave margin
+
+	// Ticker-based updates every 2 seconds so the comment always shows fresh elapsed time,
+	// even when Claude is thinking and not streaming text.
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	done := make(chan struct{})
+
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				accMu.Lock()
+				partial := accumulated.String()
+				accMu.Unlock()
+				if len(partial) > maxCommentLen {
+					partial = partial[len(partial)-maxCommentLen:]
+				}
+				elapsed := int(time.Since(start).Seconds())
+				onUpdate(partial, elapsed)
+			case <-done:
+				return
+			}
+		}
+	}()
 
 	scanner := bufio.NewScanner(stdout)
 	buf := make([]byte, 0, 64*1024)
@@ -743,7 +780,9 @@ func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(string)
 			if evt.Message != nil {
 				for _, c := range evt.Message.Content {
 					if c.Type == "text" && c.Text != "" {
+						accMu.Lock()
 						accumulated.WriteString(c.Text)
+						accMu.Unlock()
 					}
 				}
 			}
@@ -752,27 +791,12 @@ func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(string)
 			res.DurationMS = evt.DurationMS
 			res.NumTurns = evt.NumTurns
 			if evt.Result != "" {
-				// Result contains the final text; prefer it over accumulated
 				res.Text = evt.Result
 			}
 		}
-
-		// Throttle updates to avoid GitHub API rate limits.
-		interval := updateInterval
-		if firstUpdate {
-			interval = firstUpdateInterval
-		}
-		if accumulated.Len() > 0 && time.Since(lastUpdate) >= interval {
-			partial := accumulated.String()
-			if len(partial) > maxCommentLen {
-				partial = partial[len(partial)-maxCommentLen:]
-			}
-			onUpdate(partial)
-			lastUpdate = time.Now()
-			firstUpdate = false
-		}
 	}
 
+	close(done)
 	waitErr := cmd.Wait()
 	elapsed := time.Since(start)
 	log.Printf("  claude -p done (%s)", elapsed.Round(time.Millisecond))
@@ -797,6 +821,18 @@ func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(string)
 }
 
 // formatMetadataFooter returns a markdown footer with run metadata.
+// progressBody formats the in-progress comment with spinner, elapsed time, and partial output.
+func progressBody(action, partial string, elapsed int) string {
+	spinner := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	frame := spinner[(elapsed)%len(spinner)]
+
+	header := fmt.Sprintf("🤖 %s %s (%ds)", action, frame, elapsed)
+	if partial == "" {
+		return header
+	}
+	return header + "\n\n" + partial
+}
+
 func formatMetadataFooter(r *streamResult) string {
 	secs := r.DurationMS / 1000
 	return fmt.Sprintf("\n\n---\n⏱️ %ds | 💰 $%.4f | 🔄 %d turn(s)", secs, r.TotalCostUSD, r.NumTurns)

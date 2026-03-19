@@ -29,7 +29,10 @@ INSTALL_DIR="$HOME/.claude-webhook"
 mkdir -p "$INSTALL_DIR"
 
 echo "Building server..."
-go build -C "$SERVER_DIR" -o "$INSTALL_DIR/claude-webhook-server" .
+VERSION=$(git -C "$SERVER_DIR" describe --tags --always --dirty 2>/dev/null || echo "dev")
+BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS="-X main.version=$VERSION -X main.buildTime=$BUILD_TIME"
+go build -C "$SERVER_DIR" -ldflags "$LDFLAGS" -o "$INSTALL_DIR/claude-webhook-server" .
 echo "$SERVER_DIR" > "$INSTALL_DIR/source-repo"
 echo "Built: $INSTALL_DIR/claude-webhook-server (source: $SERVER_DIR)"
 

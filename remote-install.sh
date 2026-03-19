@@ -50,9 +50,13 @@ if [ -z "$LOCAL_SRC" ] && [ -f "$REPO_DIR/main.go" ] && grep -q "claude-with-web
   LOCAL_SRC="$REPO_DIR"
 fi
 
+VERSION=$(git -C "${LOCAL_SRC:-$SERVER_DIR}" describe --tags --always --dirty 2>/dev/null || echo "dev")
+BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS="-X main.version=$VERSION -X main.buildTime=$BUILD_TIME"
+
 if [ -n "$LOCAL_SRC" ]; then
   echo "Building from local source: $LOCAL_SRC"
-  go build -C "$LOCAL_SRC" -o "$SERVER_DIR/claude-webhook-server" .
+  go build -C "$LOCAL_SRC" -ldflags "$LDFLAGS" -o "$SERVER_DIR/claude-webhook-server" .
   # Remember where the source lives for future rebuilds.
   echo "$LOCAL_SRC" > "$SERVER_DIR/source-repo"
 else
@@ -61,7 +65,7 @@ else
   curl -sL "$REPO_URL/go.mod"       -o "$SERVER_DIR/go.mod"
   curl -sL "$REPO_URL/.env.example" -o "$SERVER_DIR/.env.example"
   echo "Building server..."
-  (cd "$SERVER_DIR" && go build -o claude-webhook-server .)
+  (cd "$SERVER_DIR" && go build -ldflags "$LDFLAGS" -o claude-webhook-server .)
 fi
 echo "Built: $SERVER_DIR/claude-webhook-server"
 
