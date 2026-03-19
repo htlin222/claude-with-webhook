@@ -4,6 +4,23 @@
 
 一個用 Go 撰寫的伺服器，透過 GitHub Issues 自動化 Claude Code 的規劃與實作流程。單一伺服器可處理多個 repo，透過 URL 路徑路由。當允許的使用者開啟 Issue 時，Claude 會自動產生計畫；經核准後，Claude 會在 git worktree 中實作變更並開啟 PR。
 
+## 為什麼不用 [Claude Code GitHub Actions](https://code.claude.com/docs/en/github-actions)？
+
+Anthropic 提供了官方的 GitHub Actions 整合（[`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action)）。它是個很好的產品，但不適合我們的工作流程，所以自己造了一個。
+
+| | GitHub Actions | 本專案（自架） |
+|---|---|---|
+| **執行環境** | GitHub 的 Ubuntu runner（每次觸發都要冷啟動） | 你自己的電腦（常駐運行） |
+| **認證方式** | 需要 `ANTHROPIC_API_KEY`（API 計費） | 使用本機 `claude` CLI（Pro/Max/Team 方案） |
+| **費用** | API token 費用 + GitHub Actions 分鐘數 | 你現有的訂閱，零額外費用 |
+| **本地工具** | 沒有 — 沙箱環境，無法存取你的開發設定 | 完整存取 — 你的編輯器、linter、測試套件、資料庫 |
+| **進度回饋** | 等整個 Action 跑完才看得到結果 | 即時串流 + 旋轉動畫 + 經過時間，每 2 秒更新 |
+| **多 Repo** | 每個 repo 都要一個 workflow YAML | 一個伺服器，每個 repo 跑 `~/.claude-webhook/register` |
+| **設定** | 安裝 GitHub App + 設定 API key + 複製 YAML | `make install` + `register`（不需要 API key） |
+| **網路** | GitHub → Anthropic API | Tailscale Funnel → localhost |
+
+**總結：** 如果你已經有 Claude Code 訂閱，而且想用你本地的環境（工具、設定、測試基礎設施），這個專案就是為你設計的。如果你偏好完全託管、零基礎設施的方案且不介意 API 計費，官方的 GitHub Actions 是正確的選擇。
+
 ## 安裝
 
 ```bash

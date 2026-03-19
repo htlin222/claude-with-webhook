@@ -4,6 +4,23 @@
 
 A Go server that automates Claude Code planning and implementation via GitHub issues. One server handles multiple repos, routed by URL path. When an allowed user opens an issue, Claude generates a plan. On approval, Claude implements the changes in a git worktree and opens a PR.
 
+## Why not [Claude Code GitHub Actions](https://code.claude.com/docs/en/github-actions)?
+
+Anthropic offers an official GitHub Actions integration ([`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action)). It's a solid product. But it didn't fit our workflow, so we built this instead.
+
+| | GitHub Actions | This project (self-hosted) |
+|---|---|---|
+| **Runs on** | GitHub's Ubuntu runners (cold start every trigger) | Your own machine (always warm) |
+| **Auth** | Requires `ANTHROPIC_API_KEY` (API billing) | Uses your local `claude` CLI (Pro/Max/Team plan) |
+| **Cost** | API tokens + GitHub Actions minutes | Your existing subscription, zero extra |
+| **Local tools** | None — sandbox environment, no access to your dev setup | Full access — your editors, linters, test suites, databases |
+| **Progress feedback** | Wait for the entire Action to finish | Live streaming with spinner + elapsed time, updated every 2s |
+| **Multi-repo** | One workflow file per repo | One server, `~/.claude-webhook/register` per repo |
+| **Setup** | Install GitHub App + add API key + copy YAML | `make install` + `register` (no API key needed) |
+| **Networking** | GitHub → Anthropic API | Tailscale Funnel → localhost |
+
+**TL;DR:** If you already have a Claude Code subscription and want to use your local environment (tools, configs, test infrastructure), this project lets you do that. If you prefer a managed, zero-infrastructure solution and don't mind API billing, the official GitHub Actions is the right choice.
+
 ## Install
 
 ```bash
