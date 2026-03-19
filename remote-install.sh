@@ -34,16 +34,35 @@ fi
 
 echo "All prerequisites found."
 
-# --- Central server setup (only once) ---
+# --- Central server setup ---
 mkdir -p "$SERVER_DIR"
 
-echo "Downloading source..."
-curl -sL "$REPO_URL/main.go"      -o "$SERVER_DIR/main.go"
-curl -sL "$REPO_URL/go.mod"       -o "$SERVER_DIR/go.mod"
-curl -sL "$REPO_URL/.env.example" -o "$SERVER_DIR/.env.example"
+# Find source: prefer local clone, fall back to GitHub download.
+LOCAL_SRC=""
+if [ -f "$SERVER_DIR/source-repo" ]; then
+  CANDIDATE=$(cat "$SERVER_DIR/source-repo")
+  if [ -f "$CANDIDATE/main.go" ] && [ -f "$CANDIDATE/go.mod" ]; then
+    LOCAL_SRC="$CANDIDATE"
+  fi
+fi
+# Also check if we're running from the webhook repo itself.
+if [ -z "$LOCAL_SRC" ] && [ -f "$REPO_DIR/main.go" ] && grep -q "claude-with-webhook" "$REPO_DIR/go.mod" 2>/dev/null; then
+  LOCAL_SRC="$REPO_DIR"
+fi
 
-echo "Building server..."
-(cd "$SERVER_DIR" && go build -o claude-webhook-server .)
+if [ -n "$LOCAL_SRC" ]; then
+  echo "Building from local source: $LOCAL_SRC"
+  go build -C "$LOCAL_SRC" -o "$SERVER_DIR/claude-webhook-server" .
+  # Remember where the source lives for future rebuilds.
+  echo "$LOCAL_SRC" > "$SERVER_DIR/source-repo"
+else
+  echo "Downloading source from GitHub..."
+  curl -sL "$REPO_URL/main.go"      -o "$SERVER_DIR/main.go"
+  curl -sL "$REPO_URL/go.mod"       -o "$SERVER_DIR/go.mod"
+  curl -sL "$REPO_URL/.env.example" -o "$SERVER_DIR/.env.example"
+  echo "Building server..."
+  (cd "$SERVER_DIR" && go build -o claude-webhook-server .)
+fi
 echo "Built: $SERVER_DIR/claude-webhook-server"
 
 # Generate .env if not present.

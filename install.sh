@@ -24,10 +24,14 @@ fi
 
 echo "All prerequisites found."
 
-# Build.
+# Build and install to ~/.claude-webhook.
+INSTALL_DIR="$HOME/.claude-webhook"
+mkdir -p "$INSTALL_DIR"
+
 echo "Building server..."
-(cd "$SERVER_DIR" && go build -o claude-webhook-server .)
-echo "Built: $SERVER_DIR/claude-webhook-server"
+go build -C "$SERVER_DIR" -o "$INSTALL_DIR/claude-webhook-server" .
+echo "$SERVER_DIR" > "$INSTALL_DIR/source-repo"
+echo "Built: $INSTALL_DIR/claude-webhook-server (source: $SERVER_DIR)"
 
 # Generate .env if not present.
 if [ -f "$SERVER_DIR/.env" ]; then
