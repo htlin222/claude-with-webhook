@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Register the current git repo with the claude-webhook server.
+# Usage: cd /path/to/repo && ~/.claude-webhook/register
+
+SERVER_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Must be in a git repo.
+if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+  echo "ERROR: Not inside a git repository."
+  exit 1
+fi
+
+REPO_DIR=$(git rev-parse --show-toplevel)
+
+# Check prerequisites.
+for cmd in gh tailscale; do
+  if ! command -v "$cmd" &>/dev/null; then
+    echo "ERROR: Missing required tool: $cmd"
+    exit 1
+  fi
+done
+
+# Detect GitHub repo name.
+GH_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)
+if [ -z "$GH_REPO" ]; then
+  echo "ERROR: Could not detect GitHub repo. Make sure 'gh' is authenticated."
+  exit 1
+fi
+
+# Load .env for webhook secret and port.
+if [ ! -f "$SERVER_DIR/.env" ]; then
+  echo "ERROR: $SERVER_DIR/.env not found. Run 'make install' in the claude-with-webhook repo first."
+  exit 1
+fi
+set -a
+source "$SERVER_DIR/.env"
+set +a
+
+# --- Register repo in repos.conf ---
+REPOS_CONF="$SERVER_DIR/repos.conf"
+touch "$REPOS_CONF"
+
+if grep -q "^${GH_REPO}=" "$REPOS_CONF" 2>/dev/null; then
+  sed -i.bak "s|^${GH_REPO}=.*|${GH_REPO}=${REPO_DIR}|" "$REPOS_CONF"
+  rm -f "$REPOS_CONF.bak"
+  echo "Updated: $GH_REPO → $REPO_DIR"
+else
+  echo "${GH_REPO}=${REPO_DIR}" >> "$REPOS_CONF"
+  echo "Registered: $GH_REPO → $REPO_DIR"
+fi
+
+# Create worktrees dir + .gitignore entry.
+mkdir -p "$REPO_DIR/worktrees"
+if ! grep -qx 'worktrees/' "$REPO_DIR/.gitignore" 2>/dev/null; then
+  echo 'worktrees/' >> "$REPO_DIR/.gitignore"
+  echo "Added worktrees/ to .gitignore"
+fi
+
+# Signal running server to reload.
+if pkill -HUP -f claude-webhook-server 2>/dev/null; then
+  echo "Server reloaded repos.conf."
+else
+  echo "Server not running (will pick up on next start)."
+fi
+
+# --- Ensure gh has admin:repo_hook scope ---
+SCOPES=$(gh auth status 2>&1 || true)
+if ! echo "$SCOPES" | grep -q "admin:repo_hook"; then
+  echo "Requesting admin:repo_hook scope..."
+  gh auth refresh -h github.com -s admin:repo_hook
+fi
+
+# --- Tailscale Funnel ---
+PORT="${PORT:-8080}"
+TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
+
+FUNNEL_STATUS=$(tailscale funnel status 2>&1 || true)
+if ! echo "$FUNNEL_STATUS" | grep -q "proxy http://127.0.0.1:${PORT}"; then
+  echo "Setting up Tailscale Funnel on port $PORT..."
+  tailscale funnel --bg "$PORT"
+fi
+
+# --- Create/update GitHub webhook ---
+WEBHOOK_URL="https://${TS_HOSTNAME}/${GH_REPO}/webhook"
+EXISTING_HOOK=$(gh api "repos/$GH_REPO/hooks" --jq ".[] | select(.config.url == \"$WEBHOOK_URL\") | .id" 2>/dev/null || true)
+
+if [ -n "$EXISTING_HOOK" ]; then
+  gh api "repos/$GH_REPO/hooks/$EXISTING_HOOK" --method PATCH \
+    -f "config[url]=$WEBHOOK_URL" \
+    -f 'config[content_type]=json' \
+    -f "config[secret]=$GITHUB_WEBHOOK_SECRET" \
+    -f 'events[]=issues' \
+    -f 'events[]=issue_comment' \
+    -F active=true --silent
+  echo "Webhook updated."
+else
+  gh api "repos/$GH_REPO/hooks" --method POST \
+    -f name=web \
+    -f "config[url]=$WEBHOOK_URL" \
+    -f 'config[content_type]=json' \
+    -f "config[secret]=$GITHUB_WEBHOOK_SECRET" \
+    -f 'events[]=issues' \
+    -f 'events[]=issue_comment' \
+    -F active=true --silent
+  echo "Webhook created."
+fi
+
+echo
+echo "✓ $GH_REPO registered"
+echo "  Webhook: $WEBHOOK_URL"
+echo "  Local:   $REPO_DIR"
+echo

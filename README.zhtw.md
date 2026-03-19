@@ -4,25 +4,28 @@
 
 一個用 Go 撰寫的伺服器，透過 GitHub Issues 自動化 Claude Code 的規劃與實作流程。單一伺服器可處理多個 repo，透過 URL 路徑路由。當允許的使用者開啟 Issue 時，Claude 會自動產生計畫；經核准後，Claude 會在 git worktree 中實作變更並開啟 PR。
 
-## 快速安裝
+## 安裝
 
-從任何想要自動化的 repo 目錄執行：
+```bash
+git clone https://github.com/htlin222/claude-with-webhook.git
+cd claude-with-webhook
+make install
+```
+
+建置執行檔並安裝所有內容到 `~/.claude-webhook/`。
+
+### 註冊 Repo
+
+從任何想要自動化的 git repo 目錄執行：
 
 ```bash
 cd /path/to/your-repo
-curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-install.sh | bash
+~/.claude-webhook/register
 ```
 
-這會執行以下動作：
-- 將伺服器安裝到 `~/.claude-webhook/`（所有 repo 共用）
-- 將目前的 repo 註冊到 `repos.conf`
-- 自動產生 `.env`（webhook 密鑰、GitHub 使用者、連接埠）
-- 若已有 Tailscale Funnel 則直接複用，否則設定新的
-- 為此 repo 建立 GitHub webhook
+這會註冊 repo、設定 Tailscale Funnel、並建立 GitHub webhook。
 
-從不同的 repo 目錄重新執行即可新增更多 repo。
-
-啟動伺服器：
+### 啟動伺服器
 
 ```bash
 ~/.claude-webhook/start
@@ -42,21 +45,17 @@ curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/rem
 
 在任何已註冊的 repo 開啟新 Issue，Claude 會分析內容並以留言方式發布計畫。
 
-### 追問問題
+### 透過留言互動
 
-在 Issue 中留言 `@claude <你的問題>`，Claude 會讀取完整討論串後回覆。
-
-### 核准實作
-
-回覆 **Approve**（或 **lgtm**）開始實作。可以在同一行或後續行附加額外指示：
+所有指令都需要 `@claude` 前綴以避免意外觸發：
 
 ```
-Approve
-Approve focus on error handling and add tests
-Approve 請用繁體中文寫註解
-
-LGTM
-用 TypeScript 並保持簡潔
+@claude approve
+@claude approve focus on error handling and add tests
+@claude approve 請用繁體中文寫註解
+@claude lgtm
+@claude plan                          # 重新產生計畫（若 webhook 漏接）
+@claude <追問問題>
 ```
 
 Claude 將會：
@@ -71,11 +70,15 @@ Claude 將會：
 ```
 ~/.claude-webhook/              # 集中式伺服器（單一實例）
 ├── claude-webhook-server       # 執行檔
-├── main.go / go.mod            # 原始碼（純 stdlib，無外部依賴）
+├── register                    # 註冊任何 repo（從 repo 目錄執行）
 ├── .env                        # 共用設定（密鑰、使用者、連接埠）
 ├── repos.conf                  # Repo 註冊檔
 ├── start / stop                # 控制腳本
-└── .env.example
+└── source-repo                 # 原始碼 checkout 路徑
+
+repos.conf:
+  htlin222/repo-a=/Users/you/repo-a
+  htlin222/repo-b=/Users/you/repo-b
 ```
 
 Worktrees 建立在各 repo 內部：
@@ -95,6 +98,7 @@ Worktrees 建立在各 repo 內部：
 | `POST` | `/{owner}/{repo}/webhook` | 該 repo 的 webhook 接收端點 |
 | `GET` | `/{owner}/{repo}/health` | 該 repo 的健康檢查 |
 | `GET` | `/health` | 全域健康檢查 |
+| `GET` | `/version` | 伺服器版本與建置時間 |
 
 ## 環境變數
 
@@ -102,6 +106,7 @@ Worktrees 建立在各 repo 內部：
 |------|------|
 | `GITHUB_WEBHOOK_SECRET` | 所有 repo webhook 共用的密鑰 |
 | `ALLOWED_USERS` | 允許觸發自動化的 GitHub 使用者名稱（以逗號分隔） |
+| `BOT_USERNAME` | 機器人的 GitHub 使用者名稱；會過濾自身留言以避免自我觸發 |
 | `PORT` | 伺服器監聽的連接埠（預設：`8080`） |
 | `MAX_CONCURRENT` | 最大同時處理任務數（預設：`3`） |
 
@@ -123,24 +128,21 @@ cat ~/.claude-webhook/repos.conf
 
 # 新增 repo
 cd /path/to/new-repo
-curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-install.sh | bash
+~/.claude-webhook/register
 
-# 移除 repo（刪除 webhook，從 repos.conf 移除）
-cd /path/to/repo-to-remove
-curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-uninstall.sh | bash
+# 更新原始碼後重新建置
+cd /path/to/claude-with-webhook
+make install
 
-# 重啟伺服器以套用變更
+# 重啟伺服器
 ~/.claude-webhook/stop && ~/.claude-webhook/start
 ```
 
 **建議：** 在 shell 設定檔（`~/.zshrc` 或 `~/.bashrc`）中加入別名：
 
 ```bash
-alias cwh-register='curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-install.sh | bash'
-alias cwh-unregister='curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-uninstall.sh | bash'
+alias cwh-register='~/.claude-webhook/register'
 alias cwh-start='~/.claude-webhook/start'
 alias cwh-stop='~/.claude-webhook/stop'
 alias cwh-repos='cat ~/.claude-webhook/repos.conf'
 ```
-
-之後只需 `cd /path/to/repo && cwh-register` 即可。

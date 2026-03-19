@@ -4,25 +4,28 @@
 
 A Go server that automates Claude Code planning and implementation via GitHub issues. One server handles multiple repos, routed by URL path. When an allowed user opens an issue, Claude generates a plan. On approval, Claude implements the changes in a git worktree and opens a PR.
 
-## Quick Install
+## Install
 
-Run from any repo you want to automate:
+```bash
+git clone https://github.com/htlin222/claude-with-webhook.git
+cd claude-with-webhook
+make install
+```
+
+This builds the binary and installs everything to `~/.claude-webhook/`.
+
+### Register a repo
+
+From any git repo you want to automate:
 
 ```bash
 cd /path/to/your-repo
-curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-install.sh | bash
+~/.claude-webhook/register
 ```
 
-This will:
-- Install the server at `~/.claude-webhook/` (shared across all repos)
-- Register the current repo in `repos.conf`
-- Auto-generate `.env` (webhook secret, GitHub user, port)
-- Reuse Tailscale Funnel if already running, or set one up
-- Create the GitHub webhook for this repo
+This registers the repo, sets up Tailscale Funnel, and creates the GitHub webhook.
 
-Add more repos by running the same command from each repo directory.
-
-Start the server:
+### Start the server
 
 ```bash
 ~/.claude-webhook/start
@@ -67,11 +70,11 @@ Claude will:
 ```
 ~/.claude-webhook/              # Centralized server (one instance)
 ├── claude-webhook-server       # Binary
-├── main.go / go.mod            # Source (pure stdlib, no deps)
+├── register                    # Register any repo (run from repo dir)
 ├── .env                        # Shared config (secret, users, port)
 ├── repos.conf                  # Repo registry
 ├── start / stop                # Control scripts
-└── .env.example
+└── source-repo                 # Path to source checkout
 
 repos.conf:
   htlin222/repo-a=/Users/you/repo-a
@@ -95,6 +98,7 @@ Each registered repo gets its own webhook URL:
 | `POST` | `/{owner}/{repo}/webhook` | Webhook receiver for that repo |
 | `GET` | `/{owner}/{repo}/health` | Health check for that repo |
 | `GET` | `/health` | Global health check |
+| `GET` | `/version` | Server version and build time |
 
 ## Environment Variables
 
@@ -124,24 +128,21 @@ cat ~/.claude-webhook/repos.conf
 
 # Add a new repo
 cd /path/to/new-repo
-curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-install.sh | bash
+~/.claude-webhook/register
 
-# Remove a repo (deletes webhook, removes from repos.conf)
-cd /path/to/repo-to-remove
-curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-uninstall.sh | bash
+# Rebuild after source update
+cd /path/to/claude-with-webhook
+make install
 
-# Restart server to apply changes
+# Restart server
 ~/.claude-webhook/stop && ~/.claude-webhook/start
 ```
 
 **Tip:** Add aliases to your shell config (`~/.zshrc` or `~/.bashrc`):
 
 ```bash
-alias cwh-register='curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-install.sh | bash'
-alias cwh-unregister='curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-uninstall.sh | bash'
+alias cwh-register='~/.claude-webhook/register'
 alias cwh-start='~/.claude-webhook/start'
 alias cwh-stop='~/.claude-webhook/stop'
 alias cwh-repos='cat ~/.claude-webhook/repos.conf'
 ```
-
-Then just `cd /path/to/repo && cwh-register`.
