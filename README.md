@@ -51,6 +51,7 @@ All commands require the `@claude` prefix to prevent accidental triggers:
 @claude approve focus on error handling and add tests
 @claude approve 請用繁體中文寫註解
 @claude lgtm
+@claude plan                          # re-generate plan (if webhook was missed)
 @claude <follow-up question>
 ```
 

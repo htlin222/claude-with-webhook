@@ -397,12 +397,36 @@ func handleIssueOpened(cfg *Config, repo, repoDir string, num int, p webhookPayl
 		return
 	}
 
-	log.Printf("[%s] planning for issue #%d: %s", repo, num, p.Issue.Title)
 	reactToIssue(repo, repoDir, num)
+	runPlan(repo, repoDir, num, p.Issue.Title, p.Issue.Body)
+}
+
+// handlePlan re-triggers planning from a comment (e.g. when the initial webhook was missed).
+func handlePlan(cfg *Config, repo, repoDir string, num int, p webhookPayload) {
+	log.Printf("[%s] re-planning issue #%d via comment", repo, num)
+
+	// Fetch issue title and body since the comment payload doesn't include them.
+	title, err := runCmd(repoDir, gitTimeout, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--json", "title,body", "--jq", ".title")
+	if err != nil {
+		commentError(repo, repoDir, num, "Failed to fetch issue details", err)
+		return
+	}
+	body, err := runCmd(repoDir, gitTimeout, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--json", "body", "--jq", ".body")
+	if err != nil {
+		commentError(repo, repoDir, num, "Failed to fetch issue details", err)
+		return
+	}
+
+	runPlan(repo, repoDir, num, strings.TrimSpace(title), strings.TrimSpace(body))
+}
+
+// runPlan generates a Claude plan for an issue and posts it as a comment.
+func runPlan(repo, repoDir string, num int, title, issueBody string) {
+	log.Printf("[%s] planning for issue #%d: %s", repo, num, title)
 
 	updateComment := postProgressComment(repo, repoDir, num, "🤖 Planning…")
 
-	prompt := fmt.Sprintf("Plan how to implement the following GitHub issue.\n\nTitle: %s\n\nBody:\n%s", p.Issue.Title, p.Issue.Body)
+	prompt := fmt.Sprintf("Plan how to implement the following GitHub issue.\n\nTitle: %s\n\nBody:\n%s", title, issueBody)
 	log.Printf("[%s#%d] claude started: planning", repo, num)
 	result, err := runClaudeStreaming(repoDir, claudeTimeout, func(partial string) {
 		updateComment("🤖 Planning…\n\n" + partial + "\n\n*⏳ Still working…*")
@@ -412,7 +436,7 @@ func handleIssueOpened(cfg *Config, repo, repoDir string, num int, p webhookPayl
 		return
 	}
 
-	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\nComment **@claude** to interact:\n\n```\n@claude approve\n@claude approve focus on error handling and add tests\n@claude approve 請用繁體中文寫註解\n@claude <follow-up question>\n```%s", result.Text, formatMetadataFooter(result))
+	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\nComment **@claude** to interact:\n\n```\n@claude approve\n@claude approve focus on error handling and add tests\n@claude approve 請用繁體中文寫註解\n@claude plan (re-generate this plan)\n@claude <follow-up question>\n```%s", result.Text, formatMetadataFooter(result))
 	updateComment(body)
 }
 
@@ -467,6 +491,8 @@ func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPay
 		extra := strings.TrimSpace(cmd[strings.Index(cmd, " ")+1:])
 		log.Printf("[%s#%d] approve with extra guidance: %s", repo, num, truncateLog(extra, 3))
 		handleApprove(cfg, repo, repoDir, num, p, extra)
+	case cmd == "plan":
+		handlePlan(cfg, repo, repoDir, num, p)
 	case cmd == "":
 		log.Printf("[%s#%d] ignoring bare @claude mention", repo, num)
 	default:
@@ -692,7 +718,9 @@ func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(string)
 	var accumulated strings.Builder
 	var res streamResult
 	lastUpdate := time.Now()
-	const updateInterval = 5 * time.Second
+	firstUpdate := true
+	const firstUpdateInterval = 2 * time.Second  // show partial text quickly
+	const updateInterval = 5 * time.Second        // then throttle to avoid rate limits
 	const maxCommentLen = 60000 // GitHub limit is 65536, leave margin
 
 	scanner := bufio.NewScanner(stdout)
@@ -730,13 +758,18 @@ func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(string)
 		}
 
 		// Throttle updates to avoid GitHub API rate limits.
-		if accumulated.Len() > 0 && time.Since(lastUpdate) >= updateInterval {
+		interval := updateInterval
+		if firstUpdate {
+			interval = firstUpdateInterval
+		}
+		if accumulated.Len() > 0 && time.Since(lastUpdate) >= interval {
 			partial := accumulated.String()
 			if len(partial) > maxCommentLen {
 				partial = partial[len(partial)-maxCommentLen:]
 			}
 			onUpdate(partial)
 			lastUpdate = time.Now()
+			firstUpdate = false
 		}
 	}
 
