@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Show claude-webhook server status with colored indicators.
+# Installed to ~/.claude-webhook/status by `make install`.
+
+SERVER_DIR="${CLAUDE_WEBHOOK_DIR:-$HOME/.claude-webhook}"
+GREEN="\033[32m●\033[0m"
+RED="\033[31m●\033[0m"
+YELLOW="\033[33m●\033[0m"
+DIM="\033[2m"
+RESET="\033[0m"
+
+echo
+echo "  Claude Webhook Server Status"
+echo "  ─────────────────────────────"
+echo
+
+# --- Server ---
+if pgrep -f claude-webhook-server &>/dev/null; then
+  PID=$(pgrep -f claude-webhook-server | head -1)
+  echo -e "  Server     ${GREEN} running (PID ${PID})"
+
+  # Try /version endpoint
+  PORT=$(grep -E '^PORT=' "$SERVER_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "8080")
+  PORT="${PORT:-8080}"
+  VERSION_JSON=$(curl -s --max-time 2 "http://127.0.0.1:${PORT}/version" 2>/dev/null || echo "")
+  if [ -n "$VERSION_JSON" ]; then
+    VER=$(echo "$VERSION_JSON" | jq -r '.version // "unknown"' 2>/dev/null || echo "unknown")
+    BUILD=$(echo "$VERSION_JSON" | jq -r '.build_time // "unknown"' 2>/dev/null || echo "unknown")
+    echo -e "  Version    ${DIM}${VER} (built ${BUILD})${RESET}"
+  fi
+else
+  echo -e "  Server     ${RED} stopped"
+fi
+
+# --- Port ---
+PORT=$(grep -E '^PORT=' "$SERVER_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "8080")
+PORT="${PORT:-8080}"
+echo -e "  Port       ${DIM}${PORT}${RESET}"
+
+# --- Tailscale ---
+if command -v tailscale &>/dev/null; then
+  TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' 2>/dev/null | sed 's/\.$//' || echo "")
+  if [ -n "$TS_HOSTNAME" ]; then
+    echo -e "  Tailscale  ${GREEN} ${TS_HOSTNAME}"
+  else
+    echo -e "  Tailscale  ${RED} not connected"
+  fi
+
+  # Funnel status
+  FUNNEL_STATUS=$(tailscale funnel status 2>&1 || true)
+  if echo "$FUNNEL_STATUS" | grep -q "proxy http://127.0.0.1:${PORT}"; then
+    echo -e "  Funnel     ${GREEN} active → localhost:${PORT}"
+  else
+    echo -e "  Funnel     ${RED} not active"
+  fi
+else
+  echo -e "  Tailscale  ${YELLOW} not installed"
+fi
+
+# --- Config ---
+echo
+echo "  Config"
+echo "  ──────"
+if [ -f "$SERVER_DIR/.env" ]; then
+  USERS=$(grep -E '^ALLOWED_USERS=' "$SERVER_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "")
+  BOT=$(grep -E '^BOT_USERNAME=' "$SERVER_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "")
+  MAX=$(grep -E '^MAX_CONCURRENT=' "$SERVER_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "3")
+  echo -e "  Users      ${DIM}${USERS:-<not set>}${RESET}"
+  echo -e "  Bot        ${DIM}${BOT:-<not set>}${RESET}"
+  echo -e "  Concurrent ${DIM}${MAX:-3}${RESET}"
+  echo -e "  Dir        ${DIM}${SERVER_DIR}${RESET}"
+else
+  echo -e "  ${RED} .env not found at ${SERVER_DIR}/.env"
+fi
+
+# --- Repos ---
+echo
+echo "  Registered Repos"
+echo "  ────────────────"
+REPOS_CONF="$SERVER_DIR/repos.conf"
+if [ -f "$REPOS_CONF" ] && [ -s "$REPOS_CONF" ]; then
+  while IFS='=' read -r repo path; do
+    [ -z "$repo" ] && continue
+    [[ "$repo" =~ ^# ]] && continue
+
+    # Check if path exists
+    if [ -d "$path" ]; then
+      STATUS="${GREEN}"
+    else
+      STATUS="${RED}"
+    fi
+
+    # Build webhook URL
+    if [ -n "${TS_HOSTNAME:-}" ]; then
+      URL="https://${TS_HOSTNAME}/${repo}/webhook"
+    else
+      URL="localhost:${PORT}/${repo}/webhook"
+    fi
+
+    echo -e "  ${STATUS} ${repo}"
+    echo -e "     ${DIM}${path}${RESET}"
+    echo -e "     ${DIM}${URL}${RESET}"
+  done < "$REPOS_CONF"
+else
+  echo -e "  ${DIM}(none — run ~/.claude-webhook/register from a repo)${RESET}"
+fi
+
+echo

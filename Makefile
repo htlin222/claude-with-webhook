@@ -12,9 +12,10 @@ install: build
 	@mkdir -p $(INSTALL)
 	@cp claude-webhook-server $(INSTALL)/
 	@echo "$(CURDIR)" > $(INSTALL)/source-repo
-	@# Install register script
+	@# Install scripts
 	@cp scripts/register $(INSTALL)/register
-	@chmod +x $(INSTALL)/register
+	@cp scripts/status $(INSTALL)/status
+	@chmod +x $(INSTALL)/register $(INSTALL)/status
 	@# Install start/stop scripts
 	@printf '#!/usr/bin/env bash\nset -euo pipefail\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\ncd "$$DIR"\nexec ./claude-webhook-server "$$@"\n' > $(INSTALL)/start
 	@chmod +x $(INSTALL)/start
@@ -32,6 +33,7 @@ install: build
 	@echo
 	@echo "  Start:     $(INSTALL)/start"
 	@echo "  Stop:      $(INSTALL)/stop"
+	@echo "  Status:    $(INSTALL)/status"
 	@echo "  Register:  cd /path/to/repo && $(INSTALL)/register"
 	@echo
 

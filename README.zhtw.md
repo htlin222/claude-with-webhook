@@ -217,5 +217,5 @@ make install
 alias cwh-register='~/.claude-webhook/register'
 alias cwh-start='~/.claude-webhook/start'
 alias cwh-stop='~/.claude-webhook/stop'
-alias cwh-repos='cat ~/.claude-webhook/repos.conf'
+alias cwh-status='~/.claude-webhook/status'
 ```
