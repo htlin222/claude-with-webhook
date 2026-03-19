@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -90,6 +91,35 @@ type webhookPayload struct {
 	Repository struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`
+}
+
+// Stream event types for claude --output-format stream-json
+type streamEvent struct {
+	Type         string         `json:"type"`
+	Subtype      string         `json:"subtype,omitempty"`
+	Message      *streamMessage `json:"message,omitempty"`
+	Result       string         `json:"result,omitempty"`
+	TotalCostUSD float64        `json:"total_cost_usd,omitempty"`
+	DurationMS   int64          `json:"duration_ms,omitempty"`
+	NumTurns     int            `json:"num_turns,omitempty"`
+	IsError      bool           `json:"is_error,omitempty"`
+}
+
+type streamMessage struct {
+	Content []streamContent `json:"content"`
+}
+
+type streamContent struct {
+	Type string `json:"type"` // "text", "tool_use", "thinking", "tool_result"
+	Text string `json:"text,omitempty"`
+	Name string `json:"name,omitempty"` // tool name for tool_use events
+}
+
+type streamResult struct {
+	Text         string
+	TotalCostUSD float64
+	DurationMS   int64
+	NumTurns     int
 }
 
 const (
@@ -374,13 +404,15 @@ func handleIssueOpened(cfg *Config, repo, repoDir string, num int, p webhookPayl
 
 	prompt := fmt.Sprintf("Plan how to implement the following GitHub issue.\n\nTitle: %s\n\nBody:\n%s", p.Issue.Title, p.Issue.Body)
 	log.Printf("[%s#%d] claude started: planning", repo, num)
-	plan, err := runCmd(repoDir, claudeTimeout, "claude", "-p", "--dangerously-skip-permissions", prompt)
+	result, err := runClaudeStreaming(repoDir, claudeTimeout, func(partial string) {
+		updateComment("🤖 Planning…\n\n" + partial + "\n\n*⏳ Still working…*")
+	}, prompt)
 	if err != nil {
 		updateComment(formatError("Failed to generate plan", err))
 		return
 	}
 
-	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\nComment **@claude** to interact:\n\n```\n@claude approve\n@claude approve focus on error handling and add tests\n@claude approve 請用繁體中文寫註解\n@claude <follow-up question>\n```", plan)
+	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\nComment **@claude** to interact:\n\n```\n@claude approve\n@claude approve focus on error handling and add tests\n@claude approve 請用繁體中文寫註解\n@claude <follow-up question>\n```%s", result.Text, formatMetadataFooter(result))
 	updateComment(body)
 }
 
@@ -465,13 +497,15 @@ func handleFollowUp(cfg *Config, repo, repoDir string, num int, p webhookPayload
 
 	prompt := fmt.Sprintf("You are helping with a GitHub issue. Read the full discussion below, including the original issue and all comments. The latest comment is a follow-up question or request directed at you. Respond helpfully.\n\n%s", discussion)
 	log.Printf("[%s#%d] claude started: follow-up", repo, num)
-	reply, err := runCmd(repoDir, claudeTimeout, "claude", "-p", "--dangerously-skip-permissions", prompt)
+	result, err := runClaudeStreaming(repoDir, claudeTimeout, func(partial string) {
+		updateComment("🤖 Thinking…\n\n" + partial + "\n\n*⏳ Still working…*")
+	}, prompt)
 	if err != nil {
 		updateComment(formatError("Claude follow-up failed", err))
 		return
 	}
 
-	updateComment(reply)
+	updateComment(result.Text + formatMetadataFooter(result))
 }
 
 func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload, extraGuidance string) {
@@ -516,10 +550,14 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 		prompt += fmt.Sprintf("\n\n## Additional Guidance from Approver\n\nPay special attention to the following instruction — it takes priority over general discussion:\n\n%s", extraGuidance)
 	}
 	log.Printf("[%s#%d] claude started: implementing", repo, num)
-	if _, err := runCmd(worktreeDir, claudeTimeout, "claude", "-p", "--dangerously-skip-permissions", prompt); err != nil {
+	result, err := runClaudeStreaming(worktreeDir, claudeTimeout, func(partial string) {
+		updateComment("🤖 Implementing…\n\n" + partial + "\n\n*⏳ Still working…*")
+	}, prompt)
+	if err != nil {
 		updateComment(formatError("Claude implementation failed", err))
 		return
 	}
+	_ = result // implementation uses git status for results, not claude output
 
 	status, err := runCmd(worktreeDir, gitTimeout, "git", "status", "--porcelain")
 	if err != nil {
@@ -569,6 +607,37 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 	log.Printf("[%s] PR created for issue #%d: %s", repo, num, prURL)
 }
 
+// runCmdWithStdin executes a command with stdin input.
+func runCmdWithStdin(dir string, timeout time.Duration, stdin string, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(stdin)
+	start := time.Now()
+	out, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+
+	label := name
+	if len(args) > 0 {
+		label += " " + args[0]
+	}
+
+	if ctx.Err() == context.DeadlineExceeded {
+		log.Printf("TIMEOUT: %s after %s", label, timeout)
+		return string(out), fmt.Errorf("%s %s: timed out after %s", name, strings.Join(args, " "), timeout)
+	}
+	if err != nil {
+		log.Printf("FAIL: %s (%s)", label, elapsed.Round(time.Millisecond))
+		return string(out), fmt.Errorf("%s %s: %w\n%s", name, strings.Join(args, " "), err, out)
+	}
+	if elapsed > 5*time.Second {
+		log.Printf("  %s done (%s)", label, elapsed.Round(time.Millisecond))
+	}
+	return string(out), nil
+}
+
 // runCmd executes a command in the given directory with a timeout and returns combined output.
 func runCmd(dir string, timeout time.Duration, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -597,6 +666,107 @@ func runCmd(dir string, timeout time.Duration, name string, args ...string) (str
 		log.Printf("  %s done (%s)", label, elapsed.Round(time.Millisecond))
 	}
 	return string(out), nil
+}
+
+// runClaudeStreaming runs claude with stream-json output, calling onUpdate periodically
+// with accumulated text so callers can show live progress.
+func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(string), prompt string) (*streamResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "claude", "-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions", prompt)
+	cmd.Dir = dir
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	start := time.Now()
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start claude: %w", err)
+	}
+
+	var accumulated strings.Builder
+	var res streamResult
+	lastUpdate := time.Now()
+	const updateInterval = 5 * time.Second
+	const maxCommentLen = 60000 // GitHub limit is 65536, leave margin
+
+	scanner := bufio.NewScanner(stdout)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1<<20) // 1MB max line size
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var evt streamEvent
+		if err := json.Unmarshal(line, &evt); err != nil {
+			continue // skip malformed lines
+		}
+
+		switch evt.Type {
+		case "assistant":
+			if evt.Message != nil {
+				for _, c := range evt.Message.Content {
+					if c.Type == "text" && c.Text != "" {
+						accumulated.WriteString(c.Text)
+					}
+				}
+			}
+		case "result":
+			res.TotalCostUSD = evt.TotalCostUSD
+			res.DurationMS = evt.DurationMS
+			res.NumTurns = evt.NumTurns
+			if evt.Result != "" {
+				// Result contains the final text; prefer it over accumulated
+				res.Text = evt.Result
+			}
+		}
+
+		// Throttle updates to avoid GitHub API rate limits.
+		if accumulated.Len() > 0 && time.Since(lastUpdate) >= updateInterval {
+			partial := accumulated.String()
+			if len(partial) > maxCommentLen {
+				partial = partial[len(partial)-maxCommentLen:]
+			}
+			onUpdate(partial)
+			lastUpdate = time.Now()
+		}
+	}
+
+	waitErr := cmd.Wait()
+	elapsed := time.Since(start)
+	log.Printf("  claude -p done (%s)", elapsed.Round(time.Millisecond))
+
+	// Use accumulated text if result event didn't provide final text.
+	if res.Text == "" {
+		res.Text = accumulated.String()
+	}
+
+	if ctx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("claude -p: timed out after %s", timeout)
+	}
+	if waitErr != nil {
+		// If we got some text, return it with the error for context.
+		if res.Text != "" {
+			return &res, fmt.Errorf("claude -p: %w\nstderr: %s", waitErr, stderr.String())
+		}
+		return nil, fmt.Errorf("claude -p: %w\nstderr: %s", waitErr, stderr.String())
+	}
+
+	return &res, nil
+}
+
+// formatMetadataFooter returns a markdown footer with run metadata.
+func formatMetadataFooter(r *streamResult) string {
+	secs := r.DurationMS / 1000
+	return fmt.Sprintf("\n\n---\n⏱️ %ds | 💰 $%.4f | 🔄 %d turn(s)", secs, r.TotalCostUSD, r.NumTurns)
 }
 
 // branchExists checks if a git branch exists without noisy logging.
@@ -649,12 +819,18 @@ func postProgressComment(repo, repoDir string, num int, placeholder string) func
 	commentID := strings.TrimSpace(out)
 	log.Printf("[%s#%d] progress comment created: %s", repo, num, commentID)
 	return func(body string) {
-		_, err := runCmd(repoDir, gitTimeout, "gh", "api",
+		// Use --input - to pass body via stdin, avoiding shell escaping issues with multiline content.
+		jsonBody, _ := json.Marshal(map[string]string{"body": body})
+		_, err := runCmdWithStdin(repoDir, gitTimeout, string(jsonBody), "gh", "api",
 			fmt.Sprintf("repos/%s/issues/comments/%s", repo, commentID),
 			"-X", "PATCH",
-			"-f", "body="+body)
+			"--input", "-")
 		if err != nil {
 			log.Printf("[%s#%d] failed to update comment %s, posting new: %v", repo, num, commentID, err)
+			// Delete the stale placeholder to avoid duplicates.
+			runCmd(repoDir, gitTimeout, "gh", "api",
+				fmt.Sprintf("repos/%s/issues/comments/%s", repo, commentID),
+				"-X", "DELETE")
 			postIssueComment(repo, repoDir, num, body)
 		}
 	}
