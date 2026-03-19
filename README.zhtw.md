@@ -21,6 +21,38 @@ Anthropic 提供了官方的 GitHub Actions 整合（[`anthropics/claude-code-ac
 
 **總結：** 如果你已經有 Claude Code 訂閱，而且想用你本地的環境（工具、設定、測試基礎設施），這個專案就是為你設計的。如果你偏好完全託管、零基礎設施的方案且不介意 API 計費，官方的 GitHub Actions 是正確的選擇。
 
+## 運作原理
+
+```
+你開 Issue ──→ GitHub 發送 webhook ──→ Tailscale Funnel ──→ 你的電腦
+                                                                │
+                     ┌─────────────────────────────────────────┘
+                     ▼
+              claude-webhook-server (localhost:8080)
+                     │
+                     ├─ 🤖 Planning… (立即發布進度留言)
+                     ├─ Claude CLI 產生計畫（每 2 秒串流更新）
+                     └─ 發布最終計畫，附上 @claude approve 指示
+                                    │
+               你留言               │
+               "@claude approve" ───┘
+                     │
+                     ├─ 從 origin/main 建立 git worktree
+                     ├─ Claude CLI 實作變更
+                     ├─ 提交、推送、開啟 PR
+                     └─ 更新進度留言附上 PR 連結
+```
+
+所有處理都在**你的電腦**上進行，使用**你本地的 `claude` CLI** — 不需要 API key，不需要雲端 runner。
+
+## 前置需求
+
+- [Go](https://go.dev/dl/) 1.23+
+- [GitHub CLI](https://cli.github.com/) (`gh`) — 透過 `gh auth login` 完成認證
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`) — 需要有效訂閱
+- [Tailscale](https://tailscale.com/download) 並啟用 [Funnel](https://tailscale.com/kb/1223/funnel)
+- Git, jq, openssl
+
 ## 安裝
 
 ```bash
@@ -29,7 +61,11 @@ cd claude-with-webhook
 make install
 ```
 
-建置執行檔並安裝所有內容到 `~/.claude-webhook/`。
+建置執行檔並安裝所有內容到 `~/.claude-webhook/`，包含：
+- 伺服器執行檔
+- 用於新增 repo 的 `register` 腳本
+- 啟動/停止腳本
+- `.env` 設定檔（自動產生隨機 webhook 密鑰）
 
 ### 註冊 Repo
 
@@ -40,7 +76,17 @@ cd /path/to/your-repo
 ~/.claude-webhook/register
 ```
 
-這會註冊 repo、設定 Tailscale Funnel、並建立 GitHub webhook。
+**`register` 會依序執行以下步驟：**
+
+1. 透過 `gh repo view` 偵測 GitHub repo 名稱
+2. 將 repo 加入 `~/.claude-webhook/repos.conf`
+3. 在 repo 內建立 `worktrees/` 目錄（自動加入 `.gitignore`）
+4. 檢查 `gh` 是否有 `admin:repo_hook` 權限 — 若無，**會開啟瀏覽器**進行 OAuth 授權（僅需一次，用於建立 webhook）
+5. 確認 Tailscale Funnel 已將流量導向你的本地連接埠
+6. 建立（或更新）GitHub webhook，指向 `https://<你的-tailscale-hostname>/<owner>/<repo>/webhook`
+7. 發送 SIGHUP 給運行中的伺服器，讓它立即載入新 repo
+
+你可以註冊任意數量的 repo，每個都有自己的 webhook URL。
 
 ### 啟動伺服器
 
@@ -48,34 +94,26 @@ cd /path/to/your-repo
 ~/.claude-webhook/start
 ```
 
-## 前置需求
-
-- [Go](https://go.dev/dl/) 1.23+
-- [GitHub CLI](https://cli.github.com/) (`gh`) — 已完成認證
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`)
-- [Tailscale](https://tailscale.com/download) 並啟用 Funnel
-- Git, jq, openssl
-
 ## 使用方式
 
 ### 建立計畫
 
-在任何已註冊的 repo 開啟新 Issue，Claude 會分析內容並以留言方式發布計畫。
+在任何已註冊的 repo 開啟新 Issue，Claude 會分析內容並以留言方式發布計畫 — 工作期間會顯示帶有經過時間的進度指示器。
 
 ### 透過留言互動
 
 所有指令都需要 `@claude` 前綴以避免意外觸發：
 
 ```
-@claude approve
+@claude approve                       # 開始實作
 @claude approve focus on error handling and add tests
 @claude approve 請用繁體中文寫註解
-@claude lgtm
+@claude lgtm                          # 等同 approve
 @claude plan                          # 重新產生計畫（若 webhook 漏接）
-@claude <追問問題>
+@claude <追問問題>                     # 詢問任何問題
 ```
 
-Claude 將會：
+核准後，Claude 將會：
 
 1. 從 `origin/main` 建立 git worktree 分支
 2. 實作變更

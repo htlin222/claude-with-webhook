@@ -21,6 +21,38 @@ Anthropic offers an official GitHub Actions integration ([`anthropics/claude-cod
 
 **TL;DR:** If you already have a Claude Code subscription and want to use your local environment (tools, configs, test infrastructure), this project lets you do that. If you prefer a managed, zero-infrastructure solution and don't mind API billing, the official GitHub Actions is the right choice.
 
+## How it works
+
+```
+You open an Issue ──→ GitHub sends webhook ──→ Tailscale Funnel ──→ Your machine
+                                                                        │
+                     ┌──────────────────────────────────────────────────┘
+                     ▼
+              claude-webhook-server (localhost:8080)
+                     │
+                     ├─ 🤖 Planning… (posts progress comment immediately)
+                     ├─ Claude CLI generates a plan (streaming updates every 2s)
+                     └─ Posts final plan with @claude approve instructions
+                                    │
+               You comment          │
+               "@claude approve" ───┘
+                     │
+                     ├─ Creates git worktree from origin/main
+                     ├─ Claude CLI implements the changes
+                     ├─ Commits, pushes, opens a PR
+                     └─ Updates the progress comment with PR link
+```
+
+All processing happens on **your machine** using **your local `claude` CLI** — no API key, no cloud runners.
+
+## Prerequisites
+
+- [Go](https://go.dev/dl/) 1.23+
+- [GitHub CLI](https://cli.github.com/) (`gh`) — authenticated via `gh auth login`
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`) — with an active subscription
+- [Tailscale](https://tailscale.com/download) with [Funnel](https://tailscale.com/kb/1223/funnel) enabled
+- Git, jq, openssl
+
 ## Install
 
 ```bash
@@ -29,7 +61,11 @@ cd claude-with-webhook
 make install
 ```
 
-This builds the binary and installs everything to `~/.claude-webhook/`.
+This builds the binary and installs everything to `~/.claude-webhook/`, including:
+- The server binary
+- A `register` script for adding repos
+- Start/stop scripts
+- A `.env` config file (auto-generated with a random webhook secret)
 
 ### Register a repo
 
@@ -40,7 +76,17 @@ cd /path/to/your-repo
 ~/.claude-webhook/register
 ```
 
-This registers the repo, sets up Tailscale Funnel, and creates the GitHub webhook.
+**What `register` does step by step:**
+
+1. Detects the GitHub repo name via `gh repo view`
+2. Adds it to `~/.claude-webhook/repos.conf`
+3. Creates a `worktrees/` directory in the repo (added to `.gitignore`)
+4. Checks if `gh` has the `admin:repo_hook` scope — if not, **opens your browser** for OAuth consent (one-time, needed to create webhooks)
+5. Ensures Tailscale Funnel is routing traffic to your local port
+6. Creates (or updates) a GitHub webhook pointing to `https://<your-tailscale-hostname>/<owner>/<repo>/webhook`
+7. Sends SIGHUP to the running server so it picks up the new repo immediately
+
+You can register as many repos as you want. Each one gets its own webhook URL.
 
 ### Start the server
 
@@ -48,34 +94,26 @@ This registers the repo, sets up Tailscale Funnel, and creates the GitHub webhoo
 ~/.claude-webhook/start
 ```
 
-## Prerequisites
-
-- [Go](https://go.dev/dl/) 1.23+
-- [GitHub CLI](https://cli.github.com/) (`gh`) — authenticated
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`)
-- [Tailscale](https://tailscale.com/download) with Funnel enabled
-- Git, jq, openssl
-
 ## Usage
 
 ### Create a plan
 
-Open a new issue on any registered repo. Claude will analyze the issue and post a plan as a comment.
+Open a new issue on any registered repo. Claude will analyze the issue and post a plan as a comment — you'll see a progress indicator with elapsed time while it works.
 
 ### Interact via comments
 
 All commands require the `@claude` prefix to prevent accidental triggers:
 
 ```
-@claude approve
+@claude approve                       # start implementation
 @claude approve focus on error handling and add tests
 @claude approve 請用繁體中文寫註解
-@claude lgtm
+@claude lgtm                          # same as approve
 @claude plan                          # re-generate plan (if webhook was missed)
-@claude <follow-up question>
+@claude <follow-up question>          # ask anything
 ```
 
-Claude will:
+On approve, Claude will:
 
 1. Create a git worktree branched from `origin/main`
 2. Implement the changes
