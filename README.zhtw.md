@@ -219,3 +219,36 @@ alias cwh-start='~/.claude-webhook/start'
 alias cwh-stop='~/.claude-webhook/stop'
 alias cwh-status='~/.claude-webhook/status'
 ```
+
+## 常見問題
+
+**Q: 需要 Anthropic API key 嗎？**
+不需要。伺服器呼叫你本地的 `claude` CLI，使用你現有的 Claude Pro/Max/Team 訂閱。
+
+**Q: 支援 Linux 嗎？**
+支援。純 Go 實作，無作業系統相關程式碼。需要相同的前置需求（Go、gh、claude、tailscale、git、jq、openssl）。
+
+**Q: 多人可以共用一個伺服器嗎？**
+可以 — 在 `.env` 的 `ALLOWED_USERS` 加入所有使用者名稱（以逗號分隔）。
+
+**Q: 伺服器關閉時開了 Issue 怎麼辦？**
+初始 webhook 會漏接。在 Issue 上留言 `@claude plan` 即可重新觸發規劃。
+
+**Q: 為什麼 `register` 會開啟瀏覽器？**
+建立 GitHub webhook 需要 `admin:repo_hook` OAuth 權限。只會發生一次 — 授權後，之後的 `register` 會跳過這個步驟。
+
+**Q: Claude 實作錯了怎麼辦？**
+關閉 PR，在 Issue 留下回饋，然後再次留言 `@claude approve` 並附上更具體的指示。Claude 會讀取完整討論串，包含你的回饋。
+
+**Q: 為什麼用 Tailscale Funnel 而不是 ngrok？**
+Tailscale Funnel 提供穩定的 HTTPS URL，綁定你的機器身份 — 不用註冊、不用擔心 tunnel 過期、不用管理 token。如果你已經在用 Tailscale，直接就能用。
+
+**Q: 哪些檔案永遠不會被提交？**
+`.env*`、`*.pem`、`*.key`、`*credential*`、`*secret*`、`*token*`、`node_modules/`、`.git/` — 即使 Claude 嘗試暫存這些檔案，安全過濾器也會阻擋。
+
+**Q: 如何解除安裝？**
+`make uninstall` 會移除 `~/.claude-webhook/` 並停止伺服器。你可能也需要到 repo 設定頁面刪除 GitHub webhook。
+
+## 授權
+
+[MIT](LICENSE)

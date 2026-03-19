@@ -219,3 +219,36 @@ alias cwh-start='~/.claude-webhook/start'
 alias cwh-stop='~/.claude-webhook/stop'
 alias cwh-status='~/.claude-webhook/status'
 ```
+
+## FAQ
+
+**Q: Do I need an Anthropic API key?**
+No. The server calls your local `claude` CLI, which uses your existing Claude Pro/Max/Team subscription.
+
+**Q: Does it work on Linux?**
+Yes. Pure Go with no OS-specific code. You need the same prerequisites (Go, gh, claude, tailscale, git, jq, openssl).
+
+**Q: Can multiple people share one server?**
+Yes — add all usernames to `ALLOWED_USERS` in `.env` (comma-separated). Each user's comments will be processed if they match the list.
+
+**Q: What happens if the server is down when an issue is opened?**
+The initial webhook is missed. Comment `@claude plan` on the issue to re-trigger planning.
+
+**Q: Why does `register` open my browser?**
+It needs the `admin:repo_hook` OAuth scope to create GitHub webhooks. This only happens once — after granting the scope, future `register` calls skip this step.
+
+**Q: What if Claude's implementation is wrong?**
+Close the PR, leave feedback on the issue, and comment `@claude approve` again with more specific guidance. Claude reads the full discussion including your feedback.
+
+**Q: Why Tailscale Funnel instead of ngrok?**
+Tailscale Funnel provides a stable HTTPS URL tied to your machine identity — no signup, no expiring tunnels, no token management. It just works if you're already on Tailscale.
+
+**Q: What files are never committed?**
+`.env*`, `*.pem`, `*.key`, `*credential*`, `*secret*`, `*token*`, `node_modules/`, `.git/` — the security filter blocks these even if Claude tries to stage them.
+
+**Q: How do I uninstall?**
+`make uninstall` removes `~/.claude-webhook/` and stops the server. You may also want to delete the GitHub webhooks via your repo settings.
+
+## License
+
+[MIT](LICENSE)
