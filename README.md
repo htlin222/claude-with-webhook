@@ -35,14 +35,14 @@ Anthropic offers an official GitHub Actions integration ([`anthropics/claude-cod
 | **Progress feedback** | Wait for the entire Action to finish | Live streaming with spinner + elapsed time, updated every 2s |
 | **Multi-repo** | One workflow file per repo | One server, `~/.claude-webhook/register` per repo |
 | **Setup** | Install GitHub App + add API key + copy YAML | `make install` + `register` (no API key needed) |
-| **Networking** | GitHub → Anthropic API | Tailscale Funnel → localhost |
+| **Networking** | GitHub → Anthropic API | Tailscale Funnel, ngrok, or zrok → localhost |
 
 **TL;DR:** If you already have a Claude Code subscription and want to use your local environment (tools, configs, test infrastructure), this project lets you do that. If you prefer a managed, zero-infrastructure solution and don't mind API billing, the official GitHub Actions is the right choice.
 
 ## How it works
 
 ```
-You open an Issue ──→ GitHub sends webhook ──→ Tailscale Funnel ──→ Your machine
+You open an Issue ──→ GitHub sends webhook ──→ Tunnel (Tailscale/ngrok/zrok) ──→ Your machine
                                                                         │
                      ┌──────────────────────────────────────────────────┘
                      ▼
@@ -68,7 +68,7 @@ All processing happens on **your machine** using **your local `claude` CLI** —
 - [Go](https://go.dev/dl/) 1.23+
 - [GitHub CLI](https://cli.github.com/) (`gh`) — authenticated via `gh auth login`
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`) — with an active subscription
-- [Tailscale](https://tailscale.com/download) with [Funnel](https://tailscale.com/kb/1223/funnel) enabled
+- [Tailscale](https://tailscale.com/download) with [Funnel](https://tailscale.com/kb/1223/funnel) enabled, [ngrok](https://ngrok.com/download), or [zrok](https://zrok.io) (any one — for tunneling)
 - Git, jq, openssl
 
 ## Install
@@ -100,8 +100,8 @@ cd /path/to/your-repo
 2. Adds it to `~/.claude-webhook/repos.conf`
 3. Creates a `worktrees/` directory in the repo (added to `.gitignore`)
 4. Checks if `gh` has the `admin:repo_hook` scope — if not, **opens your browser** for OAuth consent (one-time, needed to create webhooks)
-5. Ensures Tailscale Funnel is routing traffic to your local port
-6. Creates (or updates) a GitHub webhook pointing to `https://<your-tailscale-hostname>/<owner>/<repo>/webhook`
+5. Sets up a tunnel (Tailscale Funnel or ngrok) to route traffic to your local port
+6. Creates (or updates) a GitHub webhook pointing to your tunnel's public URL
 7. Sends SIGHUP to the running server so it picks up the new repo immediately
 
 You can register as many repos as you want. Each one gets its own webhook URL.
@@ -226,7 +226,7 @@ alias cwh-status='~/.claude-webhook/status'
 No. The server calls your local `claude` CLI, which uses your existing Claude Pro/Max/Team subscription.
 
 **Q: Does it work on Linux?**
-Yes. Pure Go with no OS-specific code. You need the same prerequisites (Go, gh, claude, tailscale, git, jq, openssl).
+Yes. Pure Go with no OS-specific code. You need the same prerequisites (Go, gh, claude, tailscale/ngrok/zrok, git, jq, openssl).
 
 **Q: Can multiple people share one server?**
 Yes — add all usernames to `ALLOWED_USERS` in `.env` (comma-separated). Each user's comments will be processed if they match the list.
@@ -240,8 +240,13 @@ It needs the `admin:repo_hook` OAuth scope to create GitHub webhooks. This only 
 **Q: What if Claude's implementation is wrong?**
 Close the PR, leave feedback on the issue, and comment `@claude approve` again with more specific guidance. Claude reads the full discussion including your feedback.
 
-**Q: Why Tailscale Funnel instead of ngrok?**
-Tailscale Funnel provides a stable HTTPS URL tied to your machine identity — no signup, no expiring tunnels, no token management. It just works if you're already on Tailscale.
+**Q: Can I use ngrok or zrok instead of Tailscale?**
+Yes. The `register` script auto-detects which tunnel tool is available. It checks in order: `tailscale` → `ngrok` → `zrok`. If you only have ngrok or zrok installed, it will start a tunnel automatically. Note that ngrok/zrok URLs change each time you restart (unless you have a paid plan with a static domain), so you'll need to re-run `register` after restarting the tunnel.
+
+**Q: Which tunnel tool should I choose?**
+- **Tailscale Funnel** — Stable HTTPS URL tied to your machine identity. No expiring tunnels, no token management. Best if you're already on Tailscale.
+- **ngrok** — Easy to set up (install + authenticate). Widely used. Free tier has rotating URLs; paid plans offer static domains.
+- **[zrok](https://zrok.io)** — Open-source (built on OpenZiti). Self-hostable, no account required for public shares. Good if you want full control or avoid vendor lock-in.
 
 **Q: What files are never committed?**
 `.env*`, `*.pem`, `*.key`, `*credential*`, `*secret*`, `*token*`, `node_modules/`, `.git/` — the security filter blocks these even if Claude tries to stage them.

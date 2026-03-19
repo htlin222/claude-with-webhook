@@ -35,14 +35,14 @@ Anthropic 提供了官方的 GitHub Actions 整合（[`anthropics/claude-code-ac
 | **進度回饋** | 等整個 Action 跑完才看得到結果 | 即時串流 + 旋轉動畫 + 經過時間，每 2 秒更新 |
 | **多 Repo** | 每個 repo 都要一個 workflow YAML | 一個伺服器，每個 repo 跑 `~/.claude-webhook/register` |
 | **設定** | 安裝 GitHub App + 設定 API key + 複製 YAML | `make install` + `register`（不需要 API key） |
-| **網路** | GitHub → Anthropic API | Tailscale Funnel → localhost |
+| **網路** | GitHub → Anthropic API | Tailscale Funnel、ngrok 或 zrok → localhost |
 
 **總結：** 如果你已經有 Claude Code 訂閱，而且想用你本地的環境（工具、設定、測試基礎設施），這個專案就是為你設計的。如果你偏好完全託管、零基礎設施的方案且不介意 API 計費，官方的 GitHub Actions 是正確的選擇。
 
 ## 運作原理
 
 ```
-你開 Issue ──→ GitHub 發送 webhook ──→ Tailscale Funnel ──→ 你的電腦
+你開 Issue ──→ GitHub 發送 webhook ──→ Tunnel (Tailscale/ngrok/zrok) ──→ 你的電腦
                                                                 │
                      ┌─────────────────────────────────────────┘
                      ▼
@@ -68,7 +68,7 @@ Anthropic 提供了官方的 GitHub Actions 整合（[`anthropics/claude-code-ac
 - [Go](https://go.dev/dl/) 1.23+
 - [GitHub CLI](https://cli.github.com/) (`gh`) — 透過 `gh auth login` 完成認證
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`) — 需要有效訂閱
-- [Tailscale](https://tailscale.com/download) 並啟用 [Funnel](https://tailscale.com/kb/1223/funnel)
+- [Tailscale](https://tailscale.com/download) 並啟用 [Funnel](https://tailscale.com/kb/1223/funnel)、[ngrok](https://ngrok.com/download) 或 [zrok](https://zrok.io)（擇一即可 — 用於建立通道）
 - Git, jq, openssl
 
 ## 安裝
@@ -100,8 +100,8 @@ cd /path/to/your-repo
 2. 將 repo 加入 `~/.claude-webhook/repos.conf`
 3. 在 repo 內建立 `worktrees/` 目錄（自動加入 `.gitignore`）
 4. 檢查 `gh` 是否有 `admin:repo_hook` 權限 — 若無，**會開啟瀏覽器**進行 OAuth 授權（僅需一次，用於建立 webhook）
-5. 確認 Tailscale Funnel 已將流量導向你的本地連接埠
-6. 建立（或更新）GitHub webhook，指向 `https://<你的-tailscale-hostname>/<owner>/<repo>/webhook`
+5. 設定通道（Tailscale Funnel 或 ngrok）將流量導向你的本地連接埠
+6. 建立（或更新）GitHub webhook，指向通道的公開 URL
 7. 發送 SIGHUP 給運行中的伺服器，讓它立即載入新 repo
 
 你可以註冊任意數量的 repo，每個都有自己的 webhook URL。
@@ -226,7 +226,7 @@ alias cwh-status='~/.claude-webhook/status'
 不需要。伺服器呼叫你本地的 `claude` CLI，使用你現有的 Claude Pro/Max/Team 訂閱。
 
 **Q: 支援 Linux 嗎？**
-支援。純 Go 實作，無作業系統相關程式碼。需要相同的前置需求（Go、gh、claude、tailscale、git、jq、openssl）。
+支援。純 Go 實作，無作業系統相關程式碼。需要相同的前置需求（Go、gh、claude、tailscale/ngrok/zrok、git、jq、openssl）。
 
 **Q: 多人可以共用一個伺服器嗎？**
 可以 — 在 `.env` 的 `ALLOWED_USERS` 加入所有使用者名稱（以逗號分隔）。
@@ -240,8 +240,13 @@ alias cwh-status='~/.claude-webhook/status'
 **Q: Claude 實作錯了怎麼辦？**
 關閉 PR，在 Issue 留下回饋，然後再次留言 `@claude approve` 並附上更具體的指示。Claude 會讀取完整討論串，包含你的回饋。
 
-**Q: 為什麼用 Tailscale Funnel 而不是 ngrok？**
-Tailscale Funnel 提供穩定的 HTTPS URL，綁定你的機器身份 — 不用註冊、不用擔心 tunnel 過期、不用管理 token。如果你已經在用 Tailscale，直接就能用。
+**Q: 可以用 ngrok 或 zrok 取代 Tailscale 嗎？**
+可以。`register` 腳本會自動偵測可用的通道工具，依序檢查：`tailscale` → `ngrok` → `zrok`。如果你只安裝了 ngrok 或 zrok，它會自動啟動通道。注意 ngrok/zrok URL 每次重啟都會改變（除非你有付費方案的固定域名），所以重啟通道後需要重新執行 `register`。
+
+**Q: 該選哪個通道工具？**
+- **Tailscale Funnel** — 穩定的 HTTPS URL，綁定你的機器身份。不用擔心 tunnel 過期、不用管理 token。適合已經在用 Tailscale 的使用者。
+- **ngrok** — 設定簡單（安裝後認證即可）。廣泛使用。免費方案 URL 會輪換；付費方案提供固定域名。
+- **[zrok](https://zrok.io)** — 開源（基於 OpenZiti）。可自架，公開分享不需要帳號。適合想要完全掌控或避免供應商鎖定的使用者。
 
 **Q: 哪些檔案永遠不會被提交？**
 `.env*`、`*.pem`、`*.key`、`*credential*`、`*secret*`、`*token*`、`node_modules/`、`.git/` — 即使 Claude 嘗試暫存這些檔案，安全過濾器也會阻擋。

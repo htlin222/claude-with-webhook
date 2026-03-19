@@ -39,24 +39,66 @@ PORT=$(grep -E '^PORT=' "$SERVER_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "80
 PORT="${PORT:-8080}"
 echo -e "  Port       ${DIM}${PORT}${RESET}"
 
-# --- Tailscale ---
-if command -v tailscale &>/dev/null; then
-  TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' 2>/dev/null | sed 's/\.$//' || echo "")
-  if [ -n "$TS_HOSTNAME" ]; then
-    echo -e "  Tailscale  ${GREEN} ${TS_HOSTNAME}"
+# --- Tunnel ---
+TUNNEL_FILE="$SERVER_DIR/.tunnel"
+TUNNEL_TYPE=""
+TUNNEL_URL=""
+
+if [ -f "$TUNNEL_FILE" ]; then
+  TUNNEL_TYPE=$(cat "$TUNNEL_FILE")
+fi
+
+if [ "$TUNNEL_TYPE" = "tailscale" ] || { [ -z "$TUNNEL_TYPE" ] && command -v tailscale &>/dev/null; }; then
+  if command -v tailscale &>/dev/null; then
+    TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' 2>/dev/null | sed 's/\.$//' || echo "")
+    if [ -n "$TS_HOSTNAME" ]; then
+      echo -e "  Tunnel     ${GREEN} tailscale (${TS_HOSTNAME})"
+      TUNNEL_URL="https://${TS_HOSTNAME}"
+    else
+      echo -e "  Tunnel     ${RED} tailscale (not connected)"
+    fi
+
+    FUNNEL_STATUS=$(tailscale funnel status 2>&1 || true)
+    if echo "$FUNNEL_STATUS" | grep -q "proxy http://127.0.0.1:${PORT}"; then
+      echo -e "  Funnel     ${GREEN} active → localhost:${PORT}"
+    else
+      echo -e "  Funnel     ${RED} not active"
+    fi
   else
-    echo -e "  Tailscale  ${RED} not connected"
+    echo -e "  Tunnel     ${RED} tailscale (not installed)"
   fi
 
-  # Funnel status
-  FUNNEL_STATUS=$(tailscale funnel status 2>&1 || true)
-  if echo "$FUNNEL_STATUS" | grep -q "proxy http://127.0.0.1:${PORT}"; then
-    echo -e "  Funnel     ${GREEN} active → localhost:${PORT}"
+elif [ "$TUNNEL_TYPE" = "ngrok" ] || { [ -z "$TUNNEL_TYPE" ] && command -v ngrok &>/dev/null; }; then
+  if curl -s --max-time 2 http://127.0.0.1:4040/api/tunnels &>/dev/null; then
+    NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[] | select(.proto == "https") | .public_url' 2>/dev/null | head -1)
+    if [ -n "$NGROK_URL" ]; then
+      echo -e "  Tunnel     ${GREEN} ngrok (${NGROK_URL})"
+      TUNNEL_URL="$NGROK_URL"
+    else
+      echo -e "  Tunnel     ${YELLOW} ngrok (running, no HTTPS tunnel)"
+    fi
   else
-    echo -e "  Funnel     ${RED} not active"
+    echo -e "  Tunnel     ${RED} ngrok (not running)"
   fi
+
+elif [ "$TUNNEL_TYPE" = "zrok" ] || { [ -z "$TUNNEL_TYPE" ] && command -v zrok &>/dev/null; }; then
+  ZROK_URL=$(zrok overview 2>/dev/null | jq -r '.[] | select(.share_mode == "public") | .frontend_endpoint' 2>/dev/null | head -1 || echo "")
+  if [ -n "$ZROK_URL" ]; then
+    echo -e "  Tunnel     ${GREEN} zrok (${ZROK_URL})"
+    TUNNEL_URL="$ZROK_URL"
+  else
+    # Check log file as fallback.
+    ZROK_URL=$(grep -oP 'https://[a-z0-9]+\.share\.zrok\.io' /tmp/zrok-share.log 2>/dev/null | head -1 || echo "")
+    if [ -n "$ZROK_URL" ]; then
+      echo -e "  Tunnel     ${GREEN} zrok (${ZROK_URL})"
+      TUNNEL_URL="$ZROK_URL"
+    else
+      echo -e "  Tunnel     ${RED} zrok (not sharing)"
+    fi
+  fi
+
 else
-  echo -e "  Tailscale  ${YELLOW} not installed"
+  echo -e "  Tunnel     ${YELLOW} not configured (run register)"
 fi
 
 # --- Config ---
@@ -93,8 +135,8 @@ if [ -f "$REPOS_CONF" ] && [ -s "$REPOS_CONF" ]; then
     fi
 
     # Build webhook URL
-    if [ -n "${TS_HOSTNAME:-}" ]; then
-      URL="https://${TS_HOSTNAME}/${repo}/webhook"
+    if [ -n "${TUNNEL_URL:-}" ]; then
+      URL="${TUNNEL_URL}/${repo}/webhook"
     else
       URL="localhost:${PORT}/${repo}/webhook"
     fi

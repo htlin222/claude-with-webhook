@@ -15,7 +15,7 @@ fi
 REPO_DIR=$(git rev-parse --show-toplevel)
 
 # Check prerequisites.
-for cmd in gh tailscale; do
+for cmd in gh jq curl; do
   if ! command -v "$cmd" &>/dev/null; then
     echo "ERROR: Missing required tool: $cmd"
     exit 1
@@ -72,18 +72,96 @@ if ! echo "$SCOPES" | grep -q "admin:repo_hook"; then
   gh auth refresh -h github.com -s admin:repo_hook
 fi
 
-# --- Tailscale Funnel ---
+# --- Tunnel setup ---
 PORT="${PORT:-8080}"
-TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
+TUNNEL_FILE="$SERVER_DIR/.tunnel"
 
-FUNNEL_STATUS=$(tailscale funnel status 2>&1 || true)
-if ! echo "$FUNNEL_STATUS" | grep -q "proxy http://127.0.0.1:${PORT}"; then
-  echo "Setting up Tailscale Funnel on port $PORT..."
-  tailscale funnel --bg "$PORT"
+if command -v tailscale &>/dev/null; then
+  TUNNEL_TYPE="tailscale"
+  TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
+
+  FUNNEL_STATUS=$(tailscale funnel status 2>&1 || true)
+  if ! echo "$FUNNEL_STATUS" | grep -q "proxy http://127.0.0.1:${PORT}"; then
+    echo "Setting up Tailscale Funnel on port $PORT..."
+    tailscale funnel --bg "$PORT"
+  fi
+
+  TUNNEL_URL="https://${TS_HOSTNAME}"
+
+elif command -v ngrok &>/dev/null; then
+  TUNNEL_TYPE="ngrok"
+
+  # Kill any existing ngrok process on this port.
+  if curl -s --max-time 2 http://127.0.0.1:4040/api/tunnels &>/dev/null; then
+    echo "ngrok already running, reusing existing tunnel..."
+  else
+    echo "Starting ngrok tunnel on port $PORT..."
+    ngrok http "$PORT" --log=stdout > /dev/null 2>&1 &
+
+    # Wait for ngrok to be ready (up to 10 seconds).
+    for _ in $(seq 1 20); do
+      if curl -s --max-time 1 http://127.0.0.1:4040/api/tunnels &>/dev/null; then
+        break
+      fi
+      sleep 0.5
+    done
+
+    if ! curl -s --max-time 2 http://127.0.0.1:4040/api/tunnels &>/dev/null; then
+      echo "ERROR: ngrok failed to start. Check your ngrok configuration."
+      exit 1
+    fi
+  fi
+
+  NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[] | select(.proto == "https") | .public_url' | head -1)
+  if [ -z "$NGROK_URL" ]; then
+    echo "ERROR: Could not get ngrok public URL."
+    exit 1
+  fi
+
+  TUNNEL_URL="$NGROK_URL"
+
+elif command -v zrok &>/dev/null; then
+  TUNNEL_TYPE="zrok"
+
+  # Check if zrok is already sharing on this port.
+  ZROK_URL=$(zrok overview 2>/dev/null | jq -r '.[] | select(.share_mode == "public") | .frontend_endpoint' 2>/dev/null | head -1 || echo "")
+
+  if [ -n "$ZROK_URL" ]; then
+    echo "zrok already sharing, reusing existing tunnel..."
+  else
+    echo "Starting zrok public share on port $PORT..."
+    zrok share public "http://localhost:${PORT}" --headless > /tmp/zrok-share.log 2>&1 &
+
+    # Wait for zrok to be ready (up to 15 seconds).
+    for _ in $(seq 1 30); do
+      ZROK_URL=$(grep -oP 'https://[a-z0-9]+\.share\.zrok\.io' /tmp/zrok-share.log 2>/dev/null | head -1 || echo "")
+      if [ -n "$ZROK_URL" ]; then
+        break
+      fi
+      sleep 0.5
+    done
+
+    if [ -z "$ZROK_URL" ]; then
+      echo "ERROR: zrok failed to start. Check your zrok configuration (run 'zrok invite' and 'zrok enable' first)."
+      exit 1
+    fi
+  fi
+
+  TUNNEL_URL="$ZROK_URL"
+
+else
+  echo "ERROR: No tunnel tool found. Install tailscale, ngrok, or zrok."
+  echo "  Tailscale: https://tailscale.com/download"
+  echo "  ngrok:     https://ngrok.com/download"
+  echo "  zrok:      https://zrok.io"
+  exit 1
 fi
 
+echo "$TUNNEL_TYPE" > "$TUNNEL_FILE"
+echo "Tunnel: $TUNNEL_TYPE → $TUNNEL_URL"
+
 # --- Create/update GitHub webhook ---
-WEBHOOK_URL="https://${TS_HOSTNAME}/${GH_REPO}/webhook"
+WEBHOOK_URL="${TUNNEL_URL}/${GH_REPO}/webhook"
 EXISTING_HOOK=$(gh api "repos/$GH_REPO/hooks" --jq ".[] | select(.config.url == \"$WEBHOOK_URL\") | .id" 2>/dev/null || true)
 
 if [ -n "$EXISTING_HOOK" ]; then
