@@ -13,21 +13,56 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 type Config struct {
 	WebhookSecret string
 	AllowedUsers  map[string]bool
-	BotUsername    string            // GitHub username the bot posts as; its own comments are ignored
+	BotUsername    string // GitHub username the bot posts as; its own comments are ignored
 	Port          string
-	Repos         map[string]string // "owner/repo" → local path
-	BaseDir       string            // directory where server lives (~/.claude-webhook)
+	BaseDir       string // directory where server lives (~/.claude-webhook)
+
+	reposMu sync.RWMutex
+	repos   map[string]string // "owner/repo" → local path
+}
+
+// GetRepo returns the local path for a repo, safe for concurrent access.
+func (c *Config) GetRepo(name string) (string, bool) {
+	c.reposMu.RLock()
+	defer c.reposMu.RUnlock()
+	dir, ok := c.repos[name]
+	return dir, ok
+}
+
+// ReloadRepos re-reads repos.conf from disk.
+func (c *Config) ReloadRepos() {
+	repos := loadRepos(filepath.Join(c.BaseDir, "repos.conf"))
+	c.reposMu.Lock()
+	c.repos = repos
+	c.reposMu.Unlock()
+	log.Printf("reloaded repos.conf: %d repo(s)", len(repos))
+	for repo, dir := range repos {
+		log.Printf("  %s → %s", repo, dir)
+	}
+}
+
+// AllRepos returns a snapshot of the current repo map.
+func (c *Config) AllRepos() map[string]string {
+	c.reposMu.RLock()
+	defer c.reposMu.RUnlock()
+	snapshot := make(map[string]string, len(c.repos))
+	for k, v := range c.repos {
+		snapshot[k] = v
+	}
+	return snapshot
 }
 
 // Minimal JSON structures for GitHub webhook payloads.
@@ -90,6 +125,16 @@ func main() {
 	semaphore = make(chan struct{}, maxConcurrent)
 	log.Printf("max concurrent jobs: %d", maxConcurrent)
 
+	// Reload repos.conf on SIGHUP (sent by remote-install.sh after registration).
+	sighup := make(chan os.Signal, 1)
+	signal.Notify(sighup, syscall.SIGHUP)
+	go func() {
+		for range sighup {
+			log.Printf("received SIGHUP, reloading repos.conf...")
+			cfg.ReloadRepos()
+		}
+	}()
+
 	mux := http.NewServeMux()
 
 	// Global health check.
@@ -116,7 +161,7 @@ func main() {
 		case "webhook":
 			handleWebhook(w, r, cfg, repoFullName)
 		case "health":
-			repoDir, ok := cfg.Repos[repoFullName]
+			repoDir, ok := cfg.GetRepo(repoFullName)
 			if !ok {
 				http.Error(w, fmt.Sprintf("repo %s not registered", repoFullName), http.StatusNotFound)
 				return
@@ -133,7 +178,7 @@ func main() {
 	})
 
 	log.Printf("registered repos:")
-	for repo, dir := range cfg.Repos {
+	for repo, dir := range cfg.AllRepos() {
 		log.Printf("  %s → %s", repo, dir)
 	}
 
@@ -143,7 +188,7 @@ func main() {
 }
 
 // loadConfig reads configuration from environment variables, loading .env first.
-func loadConfig() Config {
+func loadConfig() *Config {
 	// Resolve base directory (where the server binary lives).
 	exe, err := os.Executable()
 	if err != nil {
@@ -173,12 +218,12 @@ func loadConfig() Config {
 
 	repos := loadRepos(filepath.Join(baseDir, "repos.conf"))
 
-	return Config{
+	return &Config{
 		WebhookSecret: secret,
 		AllowedUsers:  allowed,
 		BotUsername:    os.Getenv("BOT_USERNAME"),
 		Port:          port,
-		Repos:         repos,
+		repos:         repos,
 		BaseDir:       baseDir,
 	}
 }
@@ -238,7 +283,7 @@ func loadDotenv(path string) {
 	}
 }
 
-func handleWebhook(w http.ResponseWriter, r *http.Request, cfg Config, repoFromURL string) {
+func handleWebhook(w http.ResponseWriter, r *http.Request, cfg *Config, repoFromURL string) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -276,7 +321,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, cfg Config, repoFromU
 	}
 
 	// Look up local path for this repo.
-	repoDir, ok := cfg.Repos[repo]
+	repoDir, ok := cfg.GetRepo(repo)
 	if !ok {
 		log.Printf("repo %s not registered in repos.conf", repo)
 		http.Error(w, fmt.Sprintf("repo %s not registered", repo), http.StatusNotFound)
@@ -315,7 +360,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, cfg Config, repoFromU
 	}()
 }
 
-func handleIssueOpened(cfg Config, repo, repoDir string, num int, p webhookPayload) {
+func handleIssueOpened(cfg *Config, repo, repoDir string, num int, p webhookPayload) {
 	sender := p.Issue.User.Login
 	if !cfg.AllowedUsers[sender] {
 		log.Printf("ignoring issue #%d from non-allowed user %s", num, sender)
@@ -339,7 +384,7 @@ func handleIssueOpened(cfg Config, repo, repoDir string, num int, p webhookPaylo
 	updateComment(body)
 }
 
-func handleIssueComment(cfg Config, repo, repoDir string, num int, p webhookPayload) {
+func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPayload) {
 	log.Printf("[%s#%d] comment from %s (type: %s): %s", repo, num, p.Comment.User.Login, p.Sender.Type, truncateLog(p.Comment.Body, 5))
 
 	if p.Sender.Type == "Bot" {
@@ -407,7 +452,7 @@ func truncateLog(s string, maxLines int) string {
 	return fmt.Sprintf("...(%d lines) | %s", len(lines), strings.Join(tail, " | "))
 }
 
-func handleFollowUp(cfg Config, repo, repoDir string, num int, p webhookPayload) {
+func handleFollowUp(cfg *Config, repo, repoDir string, num int, p webhookPayload) {
 	log.Printf("[%s] follow-up on issue #%d", repo, num)
 
 	updateComment := postProgressComment(repo, repoDir, num, "🤖 Thinking…")
@@ -429,7 +474,7 @@ func handleFollowUp(cfg Config, repo, repoDir string, num int, p webhookPayload)
 	updateComment(reply)
 }
 
-func handleApprove(cfg Config, repo, repoDir string, num int, p webhookPayload, extraGuidance string) {
+func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload, extraGuidance string) {
 	log.Printf("[%s] implementing issue #%d", repo, num)
 
 	branch := fmt.Sprintf("issue-%d", num)

@@ -88,6 +88,13 @@ else
   echo "Registered repo: $GH_REPO → $REPO_DIR"
 fi
 
+# Signal running server to reload repos.conf (if running).
+if pkill -HUP -f claude-webhook-server 2>/dev/null; then
+  echo "Sent SIGHUP to running server — repos.conf reloaded."
+else
+  echo "Server not running (will pick up new repo on next start)."
+fi
+
 # Create worktrees dir in the repo.
 mkdir -p "$REPO_DIR/worktrees"
 
