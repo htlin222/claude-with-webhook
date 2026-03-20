@@ -143,8 +143,9 @@ const (
 )
 
 var (
-	issueMu   sync.Map // per-issue mutex keyed by "repo#number"
-	semaphore chan struct{}
+	issueMu       sync.Map // per-issue mutex keyed by "repo#number"
+	deliveryCache sync.Map // X-GitHub-Delivery UUID → time.Time (dedup)
+	semaphore     chan struct{}
 
 	// Patterns for files that should never be staged.
 	dangerousFilePatterns = []string{
@@ -169,6 +170,19 @@ func main() {
 	}
 	semaphore = make(chan struct{}, maxConcurrent)
 	log.Printf("max concurrent jobs: %d", maxConcurrent)
+
+	// Periodically clean up old delivery IDs to prevent unbounded memory growth.
+	go func() {
+		for range time.Tick(10 * time.Minute) {
+			cutoff := time.Now().Add(-1 * time.Hour)
+			deliveryCache.Range(func(key, val any) bool {
+				if val.(time.Time).Before(cutoff) {
+					deliveryCache.Delete(key)
+				}
+				return true
+			})
+		}
+	}()
 
 	// Reload repos.conf on SIGHUP (sent by remote-install.sh after registration).
 	sighup := make(chan os.Signal, 1)
@@ -352,6 +366,17 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, cfg *Config, repoFrom
 	if !verifySignature(body, r.Header.Get("X-Hub-Signature-256"), cfg.WebhookSecret) {
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
+	}
+
+	// Deduplicate using GitHub's unique delivery ID to prevent duplicate
+	// processing when multiple servers receive the same event.
+	deliveryID := r.Header.Get("X-GitHub-Delivery")
+	if deliveryID != "" {
+		if _, loaded := deliveryCache.LoadOrStore(deliveryID, time.Now()); loaded {
+			log.Printf("duplicate delivery %s, skipping", deliveryID)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 	}
 
 	event := r.Header.Get("X-GitHub-Event")
