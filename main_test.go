@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestSanitizeError(t *testing.T) {
@@ -452,6 +454,179 @@ func TestWebhookSignatureVerification(t *testing.T) {
 				t.Errorf("status = %d, want %d", rr.Code, tt.wantStatus)
 			}
 		})
+	}
+}
+
+func TestQueuedConcurrency(t *testing.T) {
+	t.Run("semaphore_blocks_then_proceeds", func(t *testing.T) {
+		// Create a semaphore with capacity 1.
+		semaphore = make(chan struct{}, 1)
+
+		// Fill the single slot.
+		semaphore <- struct{}{}
+
+		acquired := make(chan struct{})
+		go func() {
+			semaphore <- struct{}{} // should block until slot freed
+			close(acquired)
+		}()
+
+		// Verify it blocks: should NOT acquire within 50ms.
+		select {
+		case <-acquired:
+			t.Fatal("goroutine should have blocked on full semaphore")
+		case <-time.After(50 * time.Millisecond):
+			// expected: still blocked
+		}
+
+		// Free one slot.
+		<-semaphore
+
+		// Verify it proceeds: should acquire within 100ms.
+		select {
+		case <-acquired:
+			// expected: unblocked
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("goroutine should have acquired semaphore after release")
+		}
+
+		// Drain the slot the goroutine filled.
+		<-semaphore
+	})
+
+	t.Run("per_issue_mutex_serializes", func(t *testing.T) {
+		var localIssueMu sync.Map
+		lockKey := "owner/repo#42"
+
+		mu, _ := localIssueMu.LoadOrStore(lockKey, &sync.Mutex{})
+		mu.(*sync.Mutex).Lock()
+
+		acquired := make(chan struct{})
+		go func() {
+			m, _ := localIssueMu.LoadOrStore(lockKey, &sync.Mutex{})
+			m.(*sync.Mutex).Lock()
+			close(acquired)
+			m.(*sync.Mutex).Unlock()
+		}()
+
+		// Verify it blocks.
+		select {
+		case <-acquired:
+			t.Fatal("goroutine should have blocked on locked mutex")
+		case <-time.After(50 * time.Millisecond):
+			// expected: still blocked
+		}
+
+		// Unlock and verify it proceeds.
+		mu.(*sync.Mutex).Unlock()
+
+		select {
+		case <-acquired:
+			// expected: unblocked
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("goroutine should have acquired mutex after unlock")
+		}
+	})
+}
+
+func TestSpinnerSVG(t *testing.T) {
+	t.Run("spinnerImg_contains_markdown_image", func(t *testing.T) {
+		if !strings.Contains(spinnerImg, "![](https://raw.githubusercontent.com/") {
+			t.Error("spinnerImg should contain markdown image syntax with GitHub raw URL")
+		}
+		if !strings.Contains(spinnerImg, `<div align="center">`) {
+			t.Error("spinnerImg should contain centered div wrapper")
+		}
+		if !strings.Contains(spinnerImg, "spinner.svg") {
+			t.Error("spinnerImg should reference spinner.svg")
+		}
+	})
+
+	t.Run("progressBody_empty_partial", func(t *testing.T) {
+		body := progressBody("Planning", "")
+		if !strings.Contains(body, spinnerImg) {
+			t.Error("progressBody with empty partial should contain spinnerImg")
+		}
+		if !strings.Contains(body, "🤖 Planning") {
+			t.Error("progressBody should contain action header")
+		}
+		// Should be just header, no trailing content.
+		expected := "🤖 Planning\n\n" + spinnerImg
+		if body != expected {
+			t.Errorf("progressBody empty partial:\ngot:  %q\nwant: %q", body, expected)
+		}
+	})
+
+	t.Run("progressBody_with_content", func(t *testing.T) {
+		body := progressBody("Planning", "some output")
+		if !strings.Contains(body, spinnerImg) {
+			t.Error("progressBody should contain spinnerImg")
+		}
+		if !strings.Contains(body, "some output") {
+			t.Error("progressBody should contain partial text")
+		}
+	})
+}
+
+func TestProgressUpdateDedup(t *testing.T) {
+	var calls []string
+	var mu sync.Mutex
+	var accumulated strings.Builder
+	var accMu sync.Mutex
+	var lastPartial string
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	done := make(chan struct{})
+
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				accMu.Lock()
+				partial := accumulated.String()
+				accMu.Unlock()
+				if partial == lastPartial {
+					continue
+				}
+				lastPartial = partial
+				mu.Lock()
+				calls = append(calls, partial)
+				mu.Unlock()
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	// Write "hello", wait for tick to fire.
+	accMu.Lock()
+	accumulated.WriteString("hello")
+	accMu.Unlock()
+	time.Sleep(30 * time.Millisecond)
+
+	// No change — tick should skip.
+	time.Sleep(30 * time.Millisecond)
+
+	// Write " world" — tick should fire again.
+	accMu.Lock()
+	accumulated.WriteString(" world")
+	accMu.Unlock()
+	time.Sleep(30 * time.Millisecond)
+
+	close(done)
+	ticker.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(calls) != 2 {
+		t.Fatalf("expected exactly 2 update calls, got %d: %v", len(calls), calls)
+	}
+	if calls[0] != "hello" {
+		t.Errorf("calls[0] = %q, want %q", calls[0], "hello")
+	}
+	if calls[1] != "hello world" {
+		t.Errorf("calls[1] = %q, want %q", calls[1], "hello world")
 	}
 }
 
