@@ -458,22 +458,66 @@ func runPlan(repo, repoDir string, num int, title, issueBody string) {
 	updateComment(body)
 }
 
-func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPayload) {
-	log.Printf("[%s#%d] comment from %s (type: %s): %s", repo, num, p.Comment.User.Login, p.Sender.Type, truncateLog(p.Comment.Body, 5))
-
-	if p.Sender.Type == "Bot" {
-		log.Printf("[%s#%d] skipping bot comment", repo, num)
-		return
+// classifyComment determines what action to take on a comment.
+// Returns: "skip-bot", "skip-self", "skip-user", "skip-no-prefix",
+//
+//	"skip-bare-mention", "approve", "plan", "followup"
+func classifyComment(cfg *Config, sender, senderType, body string) string {
+	if senderType == "Bot" {
+		return "skip-bot"
 	}
 
-	sender := p.Comment.User.Login
-	if cfg.BotUsername != "" && sender == cfg.BotUsername {
-		log.Printf("[%s#%d] skipping own comment", repo, num)
-		return
+	if cfg.BotUsername != "" && strings.EqualFold(sender, cfg.BotUsername) {
+		return "skip-self"
 	}
 
 	if !cfg.AllowedUsers[sender] {
-		log.Printf("[%s#%d] skipping non-allowed user %s", repo, num, sender)
+		return "skip-user"
+	}
+
+	trimmed := strings.TrimSpace(body)
+	firstLine := strings.ToLower(strings.SplitN(trimmed, "\n", 2)[0])
+	firstLine = strings.TrimSpace(firstLine)
+
+	if !strings.HasPrefix(firstLine, "@claude") {
+		return "skip-no-prefix"
+	}
+
+	cmd := strings.TrimSpace(strings.TrimPrefix(firstLine, "@claude"))
+
+	switch {
+	case cmd == "approve" || cmd == "approved" || cmd == "lgtm":
+		return "approve"
+	case strings.HasPrefix(cmd, "approve ") || strings.HasPrefix(cmd, "approved "):
+		return "approve"
+	case cmd == "plan":
+		return "plan"
+	case cmd == "":
+		return "skip-bare-mention"
+	default:
+		return "followup"
+	}
+}
+
+func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPayload) {
+	log.Printf("[%s#%d] comment from %s (type: %s): %s", repo, num, p.Comment.User.Login, p.Sender.Type, truncateLog(p.Comment.Body, 5))
+
+	action := classifyComment(cfg, p.Comment.User.Login, p.Sender.Type, p.Comment.Body)
+	switch action {
+	case "skip-bot":
+		log.Printf("[%s#%d] skipping bot comment", repo, num)
+		return
+	case "skip-self":
+		log.Printf("[%s#%d] skipping own comment", repo, num)
+		return
+	case "skip-user":
+		log.Printf("[%s#%d] skipping non-allowed user %s", repo, num, p.Comment.User.Login)
+		return
+	case "skip-no-prefix":
+		log.Printf("[%s#%d] ignoring comment without @claude prefix: %s", repo, num, truncateLog(p.Comment.Body, 2))
+		return
+	case "skip-bare-mention":
+		log.Printf("[%s#%d] ignoring bare @claude mention", repo, num)
 		return
 	}
 
@@ -481,39 +525,27 @@ func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPay
 	reactToComment(repo, repoDir, p.Comment.ID)
 
 	body := strings.TrimSpace(p.Comment.Body)
-	firstLine := strings.ToLower(strings.SplitN(body, "\n", 2)[0])
-	firstLine = strings.TrimSpace(firstLine)
+	cmd := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(strings.SplitN(body, "\n", 2)[0]), "@claude"))
 
-	// All commands require @claude prefix for safety.
-	if !strings.HasPrefix(firstLine, "@claude") {
-		log.Printf("[%s#%d] ignoring comment without @claude prefix: %s", repo, num, truncateLog(body, 2))
-		return
-	}
-
-	// Strip "@claude" prefix and parse the command.
-	cmd := strings.TrimSpace(strings.TrimPrefix(firstLine, "@claude"))
-
-	switch {
-	case cmd == "approve" || cmd == "approved" || cmd == "lgtm":
-		// Anything after the first line is extra guidance.
+	switch action {
+	case "approve":
 		extra := ""
-		if idx := strings.Index(body, "\n"); idx != -1 {
-			extra = strings.TrimSpace(body[idx+1:])
+		if cmd == "approve" || cmd == "approved" || cmd == "lgtm" {
+			// Anything after the first line is extra guidance.
+			if idx := strings.Index(body, "\n"); idx != -1 {
+				extra = strings.TrimSpace(body[idx+1:])
+			}
+		} else {
+			// "@claude approve focus on error handling" → single-line guidance
+			extra = strings.TrimSpace(cmd[strings.Index(cmd, " ")+1:])
 		}
 		if extra != "" {
 			log.Printf("[%s#%d] approve with extra guidance: %s", repo, num, truncateLog(extra, 3))
 		}
 		handleApprove(cfg, repo, repoDir, num, p, extra)
-	case strings.HasPrefix(cmd, "approve ") || strings.HasPrefix(cmd, "approved "):
-		// "@claude approve focus on error handling" → single-line guidance
-		extra := strings.TrimSpace(cmd[strings.Index(cmd, " ")+1:])
-		log.Printf("[%s#%d] approve with extra guidance: %s", repo, num, truncateLog(extra, 3))
-		handleApprove(cfg, repo, repoDir, num, p, extra)
-	case cmd == "plan":
+	case "plan":
 		handlePlan(cfg, repo, repoDir, num, p)
-	case cmd == "":
-		log.Printf("[%s#%d] ignoring bare @claude mention", repo, num)
-	default:
+	case "followup":
 		handleFollowUp(cfg, repo, repoDir, num, p)
 	}
 }

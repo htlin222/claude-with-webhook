@@ -1,6 +1,11 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -202,6 +207,249 @@ func TestIsDangerousFile(t *testing.T) {
 		t.Run("safe:"+f, func(t *testing.T) {
 			if isDangerousFile(f) {
 				t.Errorf("%q should be safe", f)
+			}
+		})
+	}
+}
+
+func TestClassifyComment(t *testing.T) {
+	baseCfg := &Config{
+		AllowedUsers: map[string]bool{"alice": true},
+		BotUsername:   "my-bot",
+	}
+
+	tests := []struct {
+		name       string
+		cfg        *Config
+		sender     string
+		senderType string
+		body       string
+		expected   string
+	}{
+		// BOT_USERNAME / sender filtering
+		{
+			name:       "Bot type filtered",
+			cfg:        baseCfg,
+			sender:     "ci-bot",
+			senderType: "Bot",
+			body:       "@claude approve",
+			expected:   "skip-bot",
+		},
+		{
+			name:       "BOT_USERNAME filtered",
+			cfg:        baseCfg,
+			sender:     "my-bot",
+			senderType: "User",
+			body:       "@claude approve",
+			expected:   "skip-self",
+		},
+		{
+			name:       "BOT_USERNAME case mismatch filtered",
+			cfg:        baseCfg,
+			sender:     "My-Bot",
+			senderType: "User",
+			body:       "@claude approve",
+			expected:   "skip-self",
+		},
+		{
+			name:       "allowed user passes",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "@claude approve",
+			expected:   "approve",
+		},
+		{
+			name: "no BOT_USERNAME set, allowed user passes",
+			cfg: &Config{
+				AllowedUsers: map[string]bool{"alice": true},
+				BotUsername:   "",
+			},
+			sender:     "alice",
+			senderType: "User",
+			body:       "@claude approve",
+			expected:   "approve",
+		},
+		{
+			name:       "non-allowed user skipped",
+			cfg:        baseCfg,
+			sender:     "mallory",
+			senderType: "User",
+			body:       "@claude approve",
+			expected:   "skip-user",
+		},
+
+		// Command routing
+		{
+			name:       "approve command",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "@claude approve",
+			expected:   "approve",
+		},
+		{
+			name:       "approved command",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "@claude approved",
+			expected:   "approve",
+		},
+		{
+			name:       "lgtm command",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "@claude lgtm",
+			expected:   "approve",
+		},
+		{
+			name:       "approve with inline guidance",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "@claude approve focus on error handling",
+			expected:   "approve",
+		},
+		{
+			name:       "plan command",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "@claude plan",
+			expected:   "plan",
+		},
+		{
+			name:       "bare mention skipped",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "@claude",
+			expected:   "skip-bare-mention",
+		},
+		{
+			name:       "follow-up question",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "@claude what about error handling?",
+			expected:   "followup",
+		},
+		{
+			name:       "no @claude prefix",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "this is a regular comment",
+			expected:   "skip-no-prefix",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyComment(tt.cfg, tt.sender, tt.senderType, tt.body)
+			if got != tt.expected {
+				t.Errorf("classifyComment() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExactApproveMatching(t *testing.T) {
+	cfg := &Config{
+		AllowedUsers: map[string]bool{"alice": true},
+	}
+
+	tests := []struct {
+		body     string
+		expected string
+	}{
+		{"@claude approve", "approve"},
+		{"@claude approved", "approve"},
+		{"@claude lgtm", "approve"},
+		{"@claude approve focus on tests", "approve"},
+		// These should NOT trigger approve — they are follow-ups
+		{"@claude I approve of this approach", "followup"},
+		{"@claude the plan looks approved already", "followup"},
+		{"@claude approving this seems premature", "followup"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.body, func(t *testing.T) {
+			got := classifyComment(cfg, "alice", "User", tt.body)
+			if got != tt.expected {
+				t.Errorf("classifyComment(%q) = %q, want %q", tt.body, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestWebhookSignatureVerification(t *testing.T) {
+	secret := "test-secret-123"
+	cfg := &Config{
+		WebhookSecret: secret,
+		AllowedUsers:  map[string]bool{"alice": true},
+		repos:         map[string]string{"owner/repo": "/tmp/repo"},
+		Port:          "0",
+	}
+
+	// Initialize semaphore for the handler.
+	semaphore = make(chan struct{}, 3)
+
+	validPayload := `{"action":"ping","repository":{"full_name":"owner/repo"}}`
+
+	sign := func(payload string) string {
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write([]byte(payload))
+		return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	}
+
+	tests := []struct {
+		name       string
+		signature  string
+		body       string
+		wantStatus int
+	}{
+		{
+			name:       "valid signature accepted",
+			signature:  sign(validPayload),
+			body:       validPayload,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "missing signature rejected",
+			signature:  "",
+			body:       validPayload,
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "invalid signature rejected",
+			signature:  "sha256=0000000000000000000000000000000000000000000000000000000000000000",
+			body:       validPayload,
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "malformed signature rejected",
+			signature:  "not-a-valid-sig",
+			body:       validPayload,
+			wantStatus: http.StatusUnauthorized,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/owner/repo/webhook", strings.NewReader(tt.body))
+			req.Header.Set("X-GitHub-Event", "ping")
+			if tt.signature != "" {
+				req.Header.Set("X-Hub-Signature-256", tt.signature)
+			}
+
+			rr := httptest.NewRecorder()
+			handleWebhook(rr, req, cfg, "owner/repo")
+
+			if rr.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", rr.Code, tt.wantStatus)
 			}
 		})
 	}
