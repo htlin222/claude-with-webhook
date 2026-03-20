@@ -963,6 +963,10 @@ func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(partial
 				for _, c := range evt.Message.Content {
 					if c.Type == "text" && c.Text != "" {
 						accMu.Lock()
+						// Add separator between assistant turns
+						if accumulated.Len() > 0 {
+							accumulated.WriteString("\n\n")
+						}
 						accumulated.WriteString(c.Text)
 						accMu.Unlock()
 					}

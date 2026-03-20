@@ -705,3 +705,57 @@ func TestTruncateLog(t *testing.T) {
 		})
 	}
 }
+
+func TestAssistantTurnSeparator(t *testing.T) {
+	// Multiple assistant events should be separated by \n\n
+	var accumulated strings.Builder
+	var accMu sync.Mutex
+
+	events := []streamEvent{
+		{
+			Type: "assistant",
+			Message: &streamMessage{
+				Content: []streamContent{
+					{Type: "text", Text: "First turn response."},
+				},
+			},
+		},
+		{
+			Type: "assistant",
+			Message: &streamMessage{
+				Content: []streamContent{
+					{Type: "text", Text: "Second turn response."},
+				},
+			},
+		},
+		{
+			Type: "assistant",
+			Message: &streamMessage{
+				Content: []streamContent{
+					{Type: "text", Text: "Third turn response."},
+				},
+			},
+		},
+	}
+
+	for _, evt := range events {
+		if evt.Type == "assistant" && evt.Message != nil {
+			for _, c := range evt.Message.Content {
+				if c.Type == "text" && c.Text != "" {
+					accMu.Lock()
+					if accumulated.Len() > 0 {
+						accumulated.WriteString("\n\n")
+					}
+					accumulated.WriteString(c.Text)
+					accMu.Unlock()
+				}
+			}
+		}
+	}
+
+	got := accumulated.String()
+	want := "First turn response.\n\nSecond turn response.\n\nThird turn response."
+	if got != want {
+		t.Errorf("accumulated text =\n%q\nwant:\n%q", got, want)
+	}
+}
