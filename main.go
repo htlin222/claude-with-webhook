@@ -385,21 +385,18 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, cfg *Config, repoFrom
 	w.WriteHeader(http.StatusOK)
 
 	go func() {
-		// Concurrency limiter — drop if full.
-		select {
-		case semaphore <- struct{}{}:
-			defer func() { <-semaphore }()
-		default:
-			log.Printf("concurrency limit reached, skipping %s#%d", repo, payload.Issue.Number)
-			return
-		}
-
 		num := payload.Issue.Number
 		lockKey := fmt.Sprintf("%s#%d", repo, num)
 
+		// Per-issue mutex: if this issue is already being processed,
+		// block until it finishes rather than dropping the event.
 		mu, _ := issueMu.LoadOrStore(lockKey, &sync.Mutex{})
 		mu.(*sync.Mutex).Lock()
 		defer mu.(*sync.Mutex).Unlock()
+
+		// Concurrency limiter — block-wait for a slot.
+		semaphore <- struct{}{}
+		defer func() { <-semaphore }()
 
 		switch event {
 		case "issues":

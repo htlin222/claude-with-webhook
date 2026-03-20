@@ -1,3 +1,4 @@
 worktrees/
 .env
 claude-webhook-server
+claude-with-webhook
