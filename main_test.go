@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -628,6 +629,33 @@ func TestProgressUpdateDedup(t *testing.T) {
 	if calls[1] != "hello world" {
 		t.Errorf("calls[1] = %q, want %q", calls[1], "hello world")
 	}
+}
+
+func TestPRDetection(t *testing.T) {
+	t.Run("issue_comment_has_no_pull_request", func(t *testing.T) {
+		payload := `{"action":"created","issue":{"number":1,"title":"test","body":"","user":{"login":"alice"}},"comment":{"id":1,"body":"@claude approve","user":{"login":"alice"}},"sender":{"login":"alice","type":"User"},"repository":{"full_name":"owner/repo"}}`
+		var p webhookPayload
+		if err := json.Unmarshal([]byte(payload), &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if p.Issue.PullRequest != nil {
+			t.Error("issue comment should have nil PullRequest")
+		}
+	})
+
+	t.Run("pr_comment_has_pull_request", func(t *testing.T) {
+		payload := `{"action":"created","issue":{"number":5,"title":"Fix bug","body":"","user":{"login":"alice"},"pull_request":{"url":"https://api.github.com/repos/owner/repo/pulls/5"}},"comment":{"id":2,"body":"@claude approve","user":{"login":"alice"}},"sender":{"login":"alice","type":"User"},"repository":{"full_name":"owner/repo"}}`
+		var p webhookPayload
+		if err := json.Unmarshal([]byte(payload), &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if p.Issue.PullRequest == nil {
+			t.Fatal("PR comment should have non-nil PullRequest")
+		}
+		if p.Issue.PullRequest.URL != "https://api.github.com/repos/owner/repo/pulls/5" {
+			t.Errorf("unexpected PullRequest URL: %s", p.Issue.PullRequest.URL)
+		}
+	})
 }
 
 func TestTruncateLog(t *testing.T) {

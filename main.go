@@ -76,6 +76,9 @@ type webhookPayload struct {
 		User   struct {
 			Login string `json:"login"`
 		} `json:"user"`
+		PullRequest *struct {
+			URL string `json:"url"`
+		} `json:"pull_request"`
 	} `json:"issue"`
 	Comment struct {
 		ID   int    `json:"id"`
@@ -530,21 +533,36 @@ func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPay
 	body := strings.TrimSpace(p.Comment.Body)
 	cmd := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(strings.SplitN(body, "\n", 2)[0]), "@claude"))
 
-	switch action {
-	case "approve":
-		extra := ""
+	// Determine extra guidance for approve commands.
+	extra := ""
+	if action == "approve" {
 		if cmd == "approve" || cmd == "approved" || cmd == "lgtm" {
-			// Anything after the first line is extra guidance.
 			if idx := strings.Index(body, "\n"); idx != -1 {
 				extra = strings.TrimSpace(body[idx+1:])
 			}
 		} else {
-			// "@claude approve focus on error handling" → single-line guidance
 			extra = strings.TrimSpace(cmd[strings.Index(cmd, " ")+1:])
 		}
 		if extra != "" {
 			log.Printf("[%s#%d] approve with extra guidance: %s", repo, num, truncateLog(extra, 3))
 		}
+	}
+
+	// Route to PR-specific handler when the comment is on a pull request.
+	if p.Issue.PullRequest != nil {
+		switch action {
+		case "approve":
+			handlePRComment(cfg, repo, repoDir, num, p, extra)
+		case "plan":
+			handlePRComment(cfg, repo, repoDir, num, p, "")
+		case "followup":
+			handlePRComment(cfg, repo, repoDir, num, p, "")
+		}
+		return
+	}
+
+	switch action {
+	case "approve":
 		handleApprove(cfg, repo, repoDir, num, p, extra)
 	case "plan":
 		handlePlan(cfg, repo, repoDir, num, p)
@@ -685,6 +703,103 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 	success = true
 
 	log.Printf("[%s] PR created for issue #%d: %s", repo, num, prURL)
+}
+
+func handlePRComment(cfg *Config, repo, repoDir string, num int, p webhookPayload, extraGuidance string) {
+	log.Printf("[%s] handling PR comment on #%d", repo, num)
+
+	updateComment, deleteSpinner := postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Implementing…\n\n%s", spinnerImg))
+
+	// Get the PR's head branch name.
+	branch, err := runCmd(repoDir, gitTimeout, "gh", "pr", "view", strconv.Itoa(num),
+		"--repo", repo, "--json", "headRefName", "--jq", ".headRefName")
+	if err != nil {
+		updateComment(formatError("Failed to get PR branch name", err))
+		return
+	}
+	branch = strings.TrimSpace(branch)
+
+	worktreeDir := filepath.Join(repoDir, "worktrees", fmt.Sprintf("pr-%d", num))
+
+	// Fetch the PR branch and create a worktree tracking it.
+	if _, err := runCmd(repoDir, gitTimeout, "git", "fetch", "origin", branch); err != nil {
+		updateComment(formatError("Failed to fetch PR branch", err))
+		return
+	}
+	if _, err := runCmd(repoDir, gitTimeout, "git", "worktree", "add", worktreeDir, "origin/"+branch); err != nil {
+		updateComment(formatError("Failed to create worktree for PR branch", err))
+		return
+	}
+	// Set the worktree to track the remote branch (worktree starts detached).
+	if _, err := runCmd(worktreeDir, gitTimeout, "git", "checkout", "-B", branch, "origin/"+branch); err != nil {
+		updateComment(formatError("Failed to checkout PR branch", err))
+		cleanupWorktree(repoDir, worktreeDir, "")
+		return
+	}
+
+	defer func() {
+		// Clean up worktree but do NOT delete the remote branch.
+		log.Printf("cleaning up PR worktree %s", worktreeDir)
+		runCmd(repoDir, gitTimeout, "git", "worktree", "remove", "--force", worktreeDir)
+	}()
+
+	// Read the full PR discussion.
+	discussion, err := runCmd(repoDir, gitTimeout, "gh", "pr", "view", strconv.Itoa(num), "--repo", repo, "--comments")
+	if err != nil {
+		updateComment(formatError("Failed to read PR discussion", err))
+		return
+	}
+
+	prompt := fmt.Sprintf("You are working on a pull request. Read the full PR discussion below, including the description and all comments. The latest comment is a request directed at you. Implement the requested changes.\n\n%s", discussion)
+	if extraGuidance != "" {
+		prompt += fmt.Sprintf("\n\n## Additional Guidance\n\nPay special attention to the following instruction:\n\n%s", extraGuidance)
+	}
+
+	log.Printf("[%s#%d] claude started: PR implementation", repo, num)
+	result, err := runClaudeStreaming(worktreeDir, implementTimeout, func(partial string) {
+		updateComment(progressBody("Implementing", partial))
+	}, prompt)
+	if err != nil {
+		updateComment(formatError("Claude implementation failed", err))
+		return
+	}
+	_ = result
+
+	// Check for changes, commit, and push.
+	status, err := runCmd(worktreeDir, gitTimeout, "git", "status", "--porcelain")
+	if err != nil {
+		updateComment(formatError("Failed to check git status", err))
+		return
+	}
+	if strings.TrimSpace(status) == "" {
+		updateComment("No changes were made by Claude. Nothing to commit.")
+		return
+	}
+
+	commitMsg := fmt.Sprintf("PR #%d: implement requested changes", num)
+
+	filesToAdd := filterSafeFiles(status)
+	if len(filesToAdd) == 0 {
+		updateComment("All changed files were filtered out by security policy. Nothing to commit.")
+		return
+	}
+	addArgs := append([]string{"add", "--"}, filesToAdd...)
+	if _, err := runCmd(worktreeDir, gitTimeout, "git", addArgs...); err != nil {
+		updateComment(formatError("Failed to stage changes", err))
+		return
+	}
+	if _, err := runCmd(worktreeDir, gitTimeout, "git", "commit", "-m", commitMsg); err != nil {
+		updateComment(formatError("Failed to commit", err))
+		return
+	}
+	if _, err := runCmd(worktreeDir, gitTimeout, "git", "push", "origin", branch); err != nil {
+		updateComment(formatError("Failed to push changes", err))
+		return
+	}
+
+	deleteSpinner()
+	postIssueComment(repo, repoDir, num, fmt.Sprintf("Changes pushed to `%s`.", branch))
+	log.Printf("[%s] pushed PR changes for #%d to branch %s", repo, num, branch)
 }
 
 // runCmdWithStdin executes a command with stdin input.
