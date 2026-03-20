@@ -6,6 +6,14 @@ set -euo pipefail
 
 SERVER_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Parse flags.
+FORCE=false
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=true ;;
+  esac
+done
+
 # Must be in a git repo.
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
   echo "ERROR: Not inside a git repository."
@@ -162,6 +170,36 @@ echo "Tunnel: $TUNNEL_TYPE → $TUNNEL_URL"
 
 # --- Create/update GitHub webhook ---
 WEBHOOK_URL="${TUNNEL_URL}/${GH_REPO}/webhook"
+
+# Detect existing webhooks from other servers to prevent duplicate processing.
+ALL_HOOKS=$(gh api "repos/$GH_REPO/hooks" --jq '.[].config.url' 2>/dev/null || true)
+OTHER_HOOKS=$(echo "$ALL_HOOKS" | grep "/webhook$" | grep -v "^${TUNNEL_URL}/" || true)
+
+if [ -n "$OTHER_HOOKS" ]; then
+  echo "⚠️  WARNING: This repo already has webhook(s) from other server(s):"
+  echo "$OTHER_HOOKS"
+  echo ""
+  echo "Multiple servers on the same repo will cause duplicate plans and conflicting PRs."
+
+  if [ "$FORCE" = true ]; then
+    echo "  --force: removing existing webhook(s)..."
+    CONFIRM="y"
+  else
+    read -rp "Replace existing webhook(s) and continue? [y/N] " CONFIRM
+  fi
+
+  if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
+    for hook_url in $OTHER_HOOKS; do
+      OLD_ID=$(gh api "repos/$GH_REPO/hooks" --jq ".[] | select(.config.url == \"$hook_url\") | .id")
+      gh api "repos/$GH_REPO/hooks/$OLD_ID" --method DELETE --silent
+      echo "Removed old webhook: $hook_url"
+    done
+  else
+    echo "Aborted. Remove the other webhook manually or use --force."
+    exit 1
+  fi
+fi
+
 EXISTING_HOOK=$(gh api "repos/$GH_REPO/hooks" --jq ".[] | select(.config.url == \"$WEBHOOK_URL\") | .id" 2>/dev/null || true)
 
 if [ -n "$EXISTING_HOOK" ]; then

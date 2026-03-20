@@ -101,7 +101,8 @@ From any git repo you want to automate:
 
 ```bash
 cd /path/to/your-repo
-~/.claude-webhook/register
+~/.claude-webhook/register          # interactive — warns if another server exists
+~/.claude-webhook/register --force  # auto-remove other server's webhook
 ```
 
 **What `register` does step by step:**
@@ -257,6 +258,9 @@ Yes. The `register` script auto-detects which tunnel tool is available. It check
 - **Tailscale Funnel** — Stable HTTPS URL tied to your machine identity. No expiring tunnels, no token management. Best if you're already on Tailscale.
 - **ngrok** — Easy to set up (install + authenticate). Widely used. Free tier has rotating URLs; paid plans offer static domains.
 - **[zrok](https://zrok.io)** — Open-source (built on OpenZiti). Self-hostable, no account required for public shares. Good if you want full control or avoid vendor lock-in.
+
+**Q: Can I run two servers for the same repo (e.g., on different machines)?**
+No — this is intentionally a single-server-per-repo design. If two servers register webhooks for the same repo, GitHub delivers every event to both, causing duplicate plans and conflicting PRs. The `register` script detects this and warns you. If you're migrating a repo to a new machine, run `register --force` on the new machine to remove the old webhook automatically. As defense-in-depth, the server also deduplicates events using GitHub's `X-GitHub-Delivery` header.
 
 **Q: What files are never committed?**
 `.env*`, `*.pem`, `*.key`, `*credential*`, `*secret*`, `*token*`, `node_modules/`, `.git/` — the security filter blocks these even if Claude tries to stage them.
