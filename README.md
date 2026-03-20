@@ -32,7 +32,7 @@ Anthropic offers an official GitHub Actions integration ([`anthropics/claude-cod
 | **Auth** | Requires `ANTHROPIC_API_KEY` (API billing) | Uses your local `claude` CLI (Pro/Max/Team plan) |
 | **Cost** | API tokens + GitHub Actions minutes | Your existing subscription, zero extra |
 | **Local tools** | None — sandbox environment, no access to your dev setup | Full access — your editors, linters, test suites, databases |
-| **Progress feedback** | Wait for the entire Action to finish | Live streaming with spinner + elapsed time, updated every 2s |
+| **Progress feedback** | Wait for the entire Action to finish | Live streaming with animated SVG spinner, updates only on new output |
 | **Multi-repo** | One workflow file per repo | One server, `~/.claude-webhook/register` per repo |
 | **Setup** | Install GitHub App + add API key + copy YAML | `make install` + `register` (no API key needed) |
 | **Networking** | GitHub → Anthropic API | Tailscale Funnel, ngrok, or zrok → localhost |
@@ -84,6 +84,16 @@ This builds the binary and installs everything to `~/.claude-webhook/`, includin
 - A `register` script for adding repos
 - Start/stop scripts
 - A `.env` config file (auto-generated with a random webhook secret)
+
+### Make commands
+
+| Command | Description |
+|---------|-------------|
+| `make build` | Build the server binary in the current directory |
+| `make install` | Build + install binary, scripts, and `.env` to `~/.claude-webhook/` |
+| `make restart` | Build + install + stop running server + start new one |
+| `make uninstall` | Stop the server and remove `~/.claude-webhook/` |
+| `make clean` | Remove the local build artifact |
 
 ### Register a repo
 
@@ -187,7 +197,7 @@ Each registered repo gets its own webhook URL:
 
 The server includes several hardening measures:
 
-- **Command timeouts** — Planning: 10 min, follow-up: 5 min, implementation: 30 min, git/gh commands: 30 sec (via `context.WithTimeout`)
+- **Command timeouts** — Planning: 30 min, follow-up: 30 min, implementation: 60 min, git/gh commands: 30 sec (via `context.WithTimeout`)
 - **Concurrency limit** — Max 3 concurrent jobs (configurable via `MAX_CONCURRENT`); excess requests are dropped with a log warning
 - **Error sanitization** — Error comments posted to GitHub are truncated to 500 chars, lines containing secret keywords (`token`, `key`, `secret`, `password`, `credential`) are stripped, and absolute file paths are redacted
 - **Filtered git add** — Files matching dangerous patterns (`.env*`, `*.pem`, `*.key`, `*credential*`, `*secret*`, `*token*`, `node_modules/`, `.git/`) are never staged or committed

@@ -129,9 +129,9 @@ type streamResult struct {
 }
 
 const (
-	planTimeout      = 10 * time.Minute
-	followUpTimeout  = 5 * time.Minute
-	implementTimeout = 30 * time.Minute
+	planTimeout      = 30 * time.Minute
+	followUpTimeout  = 30 * time.Minute
+	implementTimeout = 60 * time.Minute
 	gitTimeout       = 30 * time.Second
 	maxErrorLen      = 500
 
