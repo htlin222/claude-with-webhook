@@ -129,11 +129,17 @@ type streamResult struct {
 }
 
 const (
-	planTimeout     = 10 * time.Minute
-	followUpTimeout = 5 * time.Minute
+	planTimeout      = 10 * time.Minute
+	followUpTimeout  = 5 * time.Minute
 	implementTimeout = 30 * time.Minute
-	gitTimeout      = 30 * time.Second
-	maxErrorLen     = 500
+	gitTimeout       = 30 * time.Second
+	maxErrorLen      = 500
+
+	spinnerImg = `<div align="center">
+
+![](https://raw.githubusercontent.com/htlin222/claude-with-webhook/e19f046c9ae189880d65d778f2cb1305978cc52c/assests/spinner.svg)
+
+</div>`
 )
 
 var (
@@ -442,12 +448,12 @@ func handlePlan(cfg *Config, repo, repoDir string, num int, p webhookPayload) {
 func runPlan(repo, repoDir string, num int, title, issueBody string) {
 	log.Printf("[%s] planning for issue #%d: %s", repo, num, title)
 
-	updateComment := postProgressComment(repo, repoDir, num, "🤖 Planning…")
+	updateComment, _ := postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Planning…\n\n%s", spinnerImg))
 
 	prompt := fmt.Sprintf("Plan how to implement the following GitHub issue.\n\nTitle: %s\n\nBody:\n%s", title, issueBody)
 	log.Printf("[%s#%d] claude started: planning", repo, num)
-	result, err := runClaudeStreaming(repoDir, planTimeout, func(partial string, elapsed int) {
-		updateComment(progressBody("Planning", partial, elapsed))
+	result, err := runClaudeStreaming(repoDir, planTimeout, func(partial string) {
+		updateComment(progressBody("Planning", partial))
 	}, prompt)
 	if err != nil {
 		updateComment(formatError("Failed to generate plan", err))
@@ -563,7 +569,7 @@ func truncateLog(s string, maxLines int) string {
 func handleFollowUp(cfg *Config, repo, repoDir string, num int, p webhookPayload) {
 	log.Printf("[%s] follow-up on issue #%d", repo, num)
 
-	updateComment := postProgressComment(repo, repoDir, num, "🤖 Thinking…")
+	updateComment, _ := postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Thinking…\n\n%s", spinnerImg))
 
 	discussion, err := runCmd(repoDir, gitTimeout, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--comments")
 	if err != nil {
@@ -573,8 +579,8 @@ func handleFollowUp(cfg *Config, repo, repoDir string, num int, p webhookPayload
 
 	prompt := fmt.Sprintf("You are helping with a GitHub issue. Read the full discussion below, including the original issue and all comments. The latest comment is a follow-up question or request directed at you. Respond helpfully.\n\n%s", discussion)
 	log.Printf("[%s#%d] claude started: follow-up", repo, num)
-	result, err := runClaudeStreaming(repoDir, followUpTimeout, func(partial string, elapsed int) {
-		updateComment(progressBody("Thinking", partial, elapsed))
+	result, err := runClaudeStreaming(repoDir, followUpTimeout, func(partial string) {
+		updateComment(progressBody("Thinking", partial))
 	}, prompt)
 	if err != nil {
 		updateComment(formatError("Claude follow-up failed", err))
@@ -596,7 +602,7 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 		return
 	}
 
-	updateComment := postProgressComment(repo, repoDir, num, "🤖 Implementing…")
+	updateComment, deleteSpinner := postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Implementing…\n\n%s", spinnerImg))
 
 	if _, err := runCmd(repoDir, gitTimeout, "git", "fetch", "origin", "main"); err != nil {
 		updateComment(formatError("Failed to fetch origin/main", err))
@@ -626,8 +632,8 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 		prompt += fmt.Sprintf("\n\n## Additional Guidance from Approver\n\nPay special attention to the following instruction — it takes priority over general discussion:\n\n%s", extraGuidance)
 	}
 	log.Printf("[%s#%d] claude started: implementing", repo, num)
-	result, err := runClaudeStreaming(worktreeDir, implementTimeout, func(partial string, elapsed int) {
-		updateComment(progressBody("Implementing", partial, elapsed))
+	result, err := runClaudeStreaming(worktreeDir, implementTimeout, func(partial string) {
+		updateComment(progressBody("Implementing", partial))
 	}, prompt)
 	if err != nil {
 		updateComment(formatError("Claude implementation failed", err))
@@ -677,7 +683,8 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 	}
 
 	prURL = strings.TrimSpace(prURL)
-	updateComment(fmt.Sprintf("PR created: %s", prURL))
+	deleteSpinner()
+	postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s", prURL))
 	success = true
 
 	log.Printf("[%s] PR created for issue #%d: %s", repo, num, prURL)
@@ -745,8 +752,8 @@ func runCmd(dir string, timeout time.Duration, name string, args ...string) (str
 }
 
 // runClaudeStreaming runs claude with stream-json output, calling onUpdate periodically
-// with accumulated text and elapsed seconds so callers can show live progress.
-func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(partial string, elapsed int), prompt string) (*streamResult, error) {
+// with accumulated text so callers can show live progress.
+func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(partial string), prompt string) (*streamResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -770,11 +777,12 @@ func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(partial
 	var res streamResult
 	const maxCommentLen = 60000 // GitHub limit is 65536, leave margin
 
-	// Ticker-based updates every 2 seconds so the comment always shows fresh elapsed time,
-	// even when Claude is thinking and not streaming text.
+	// Ticker-based updates every 2 seconds. Since the SVG spinner animates
+	// natively, we only update the comment when partial text actually changes.
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	done := make(chan struct{})
+	var lastPartial string
 
 	go func() {
 		for {
@@ -783,11 +791,14 @@ func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(partial
 				accMu.Lock()
 				partial := accumulated.String()
 				accMu.Unlock()
+				if partial == lastPartial {
+					continue // no new text, skip update
+				}
+				lastPartial = partial
 				if len(partial) > maxCommentLen {
 					partial = partial[len(partial)-maxCommentLen:]
 				}
-				elapsed := int(time.Since(start).Seconds())
-				onUpdate(partial, elapsed)
+				onUpdate(partial)
 			case <-done:
 				return
 			}
@@ -855,12 +866,9 @@ func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(partial
 }
 
 // formatMetadataFooter returns a markdown footer with run metadata.
-// progressBody formats the in-progress comment with spinner, elapsed time, and partial output.
-func progressBody(action, partial string, elapsed int) string {
-	spinner := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	frame := spinner[(elapsed)%len(spinner)]
-
-	header := fmt.Sprintf("🤖 %s %s (%ds)", action, frame, elapsed)
+// progressBody formats the in-progress comment with SVG spinner and partial output.
+func progressBody(action, partial string) string {
+	header := fmt.Sprintf("🤖 %s\n\n%s", action, spinnerImg)
 	if partial == "" {
 		return header
 	}
@@ -901,10 +909,11 @@ func postIssueComment(repo, repoDir string, num int, body string) error {
 	return err
 }
 
-// postProgressComment posts a "working on it" placeholder and returns a
-// function that updates that comment with the final body. If the placeholder
-// fails, the updater falls back to posting a new comment.
-func postProgressComment(repo, repoDir string, num int, placeholder string) func(string) {
+// postProgressComment posts a "working on it" placeholder and returns an
+// update function (to replace the comment body) and a delete function (to
+// remove the comment entirely). If the placeholder fails, delete is a no-op
+// and the updater falls back to posting a new comment.
+func postProgressComment(repo, repoDir string, num int, placeholder string) (update func(string), delete func()) {
 	// Create the placeholder comment and capture its ID.
 	out, err := runCmd(repoDir, gitTimeout, "gh", "api",
 		fmt.Sprintf("repos/%s/issues/%d/comments", repo, num),
@@ -913,15 +922,16 @@ func postProgressComment(repo, repoDir string, num int, placeholder string) func
 		"--jq", ".id")
 	if err != nil {
 		log.Printf("[%s#%d] failed to post progress comment: %v", repo, num, err)
-		// Return a fallback that just posts a new comment.
+		// Return a fallback updater and no-op deleter.
 		return func(body string) {
 			postIssueComment(repo, repoDir, num, body)
-		}
+		}, func() {}
 	}
 
 	commentID := strings.TrimSpace(out)
 	log.Printf("[%s#%d] progress comment created: %s", repo, num, commentID)
-	return func(body string) {
+
+	update = func(body string) {
 		// Use --input - to pass body via stdin, avoiding shell escaping issues with multiline content.
 		jsonBody, _ := json.Marshal(map[string]string{"body": body})
 		_, err := runCmdWithStdin(repoDir, gitTimeout, string(jsonBody), "gh", "api",
@@ -937,6 +947,17 @@ func postProgressComment(repo, repoDir string, num int, placeholder string) func
 			postIssueComment(repo, repoDir, num, body)
 		}
 	}
+
+	delete = func() {
+		_, err := runCmd(repoDir, gitTimeout, "gh", "api",
+			fmt.Sprintf("repos/%s/issues/comments/%s", repo, commentID),
+			"-X", "DELETE")
+		if err != nil {
+			log.Printf("[%s#%d] failed to delete progress comment %s: %v", repo, num, commentID, err)
+		}
+	}
+
+	return update, delete
 }
 
 // reactToIssue adds an 👀 emoji reaction to an issue.
