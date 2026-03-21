@@ -206,6 +206,55 @@ Each registered repo gets its own webhook URL:
 | `PORT` | Port the server listens on (default: `8080`) |
 | `MAX_CONCURRENT` | Max concurrent jobs (default: `3`) |
 
+## Dual-Account Setup (Primary + Bot)
+
+### Why two accounts?
+
+This project works best with two separate GitHub accounts:
+
+- **Primary account** — your real account. You open issues, discuss, and comment `@claude approve`.
+- **Bot account** — a secondary account authenticated on the VM. It posts plans, creates PRs, and pushes code.
+
+This separation gives you:
+- **Clarity** — you always know which comments are human vs automated
+- **No infinite loops** — `BOT_USERNAME` filtering prevents the bot from triggering itself
+- **Clean audit trail** — PRs and comments from the bot are visually distinct
+
+### Setup on the VM
+
+1. **Create a bot GitHub account** (e.g., `my-team-bot`) and add it as a collaborator to your repos (needs write access)
+
+2. **On the VM, authenticate as the bot account:**
+   ```bash
+   gh auth login          # log in as the bot account
+   claude                 # authenticate Claude Code (needs active subscription)
+   ```
+
+3. **Configure `.env`:**
+   ```bash
+   ALLOWED_USERS=your-primary-account
+   BOT_USERNAME=my-team-bot
+   ```
+
+4. **Install and register:**
+   ```bash
+   make install
+   cd /path/to/repo && ~/.claude-webhook/register
+   ```
+
+### How it looks
+
+```
+Primary account (you) ──→ opens issue / comments "@claude approve"
+                              │
+                              ▼ (webhook)
+VM (authenticated as bot) ──→ claude-webhook-server
+                              │
+                              ├─ Claude Code generates plan
+                              ├─ Bot account posts comment with plan
+                              └─ Bot account opens PR with implementation
+```
+
 ## Security
 
 The server includes several hardening measures:
