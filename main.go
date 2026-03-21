@@ -197,6 +197,15 @@ func main() {
 		}
 	}()
 
+	// Graceful shutdown on SIGINT/SIGTERM — log the signal before exiting.
+	shutdown := make(chan os.Signal, 1)
+	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-shutdown
+		log.Printf("received %s, shutting down...", sig)
+		os.Exit(0)
+	}()
+
 	mux := http.NewServeMux()
 
 	// Global health check.

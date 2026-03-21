@@ -142,12 +142,24 @@ All commands require the `@claude` prefix to prevent accidental triggers:
 @claude <follow-up question>          # ask anything
 ```
 
-On approve, Claude will:
+These commands work on both **issues** and **pull requests**:
+
+- **On an issue:** `@claude approve` creates a new branch, implements changes, and opens a PR.
+- **On a PR:** `@claude approve` checks out the PR's existing branch, implements the requested changes, commits, and pushes directly to the PR branch.
+
+On approve (from an issue), Claude will:
 
 1. Create a git worktree branched from `origin/main`
 2. Implement the changes
 3. Commit, push, and open a PR
 4. Comment on the issue with a link to the PR
+
+On approve (from a PR), Claude will:
+
+1. Fetch the PR branch and create a worktree tracking it
+2. Read the full PR discussion (description + all comments)
+3. Implement the requested changes
+4. Commit and push to the PR branch
 
 ## Architecture
 
@@ -200,6 +212,7 @@ The server includes several hardening measures:
 
 - **Command timeouts** — Planning: 30 min, follow-up: 30 min, implementation: 60 min, git/gh commands: 30 sec (via `context.WithTimeout`)
 - **Concurrency limit** — Max 3 concurrent jobs (configurable via `MAX_CONCURRENT`); excess requests are dropped with a log warning
+- **Event deduplication** — Each webhook delivery is tracked by its `X-GitHub-Delivery` UUID; duplicate events are silently skipped (cache auto-cleans hourly)
 - **Error sanitization** — Error comments posted to GitHub are truncated to 500 chars, lines containing secret keywords (`token`, `key`, `secret`, `password`, `credential`) are stripped, and absolute file paths are redacted
 - **Filtered git add** — Files matching dangerous patterns (`.env*`, `*.pem`, `*.key`, `*credential*`, `*secret*`, `*token*`, `node_modules/`, `.git/`) are never staged or committed
 - **Worktree isolation** — All implementations run in isolated git worktrees, not the main checkout

@@ -131,12 +131,24 @@ cd /path/to/your-repo
 @claude <追問問題>                     # 詢問任何問題
 ```
 
-核准後，Claude 將會：
+這些指令同時適用於 **Issue** 和 **Pull Request**：
+
+- **在 Issue 上：** `@claude approve` 會建立新分支、實作變更並開啟 PR。
+- **在 PR 上：** `@claude approve` 會 checkout PR 的現有分支、實作所需變更，並直接推送至 PR 分支。
+
+核准後（從 Issue），Claude 將會：
 
 1. 從 `origin/main` 建立 git worktree 分支
 2. 實作變更
 3. 提交、推送並開啟 PR
 4. 在 Issue 中留言附上 PR 連結
+
+核准後（從 PR），Claude 將會：
+
+1. 取得 PR 分支並建立追蹤該分支的 worktree
+2. 讀取完整 PR 討論串（描述 + 所有留言）
+3. 實作所需變更
+4. 提交並推送至 PR 分支
 
 ## 架構
 
@@ -187,8 +199,9 @@ Worktrees 建立在各 repo 內部：
 
 伺服器包含多項安全強化措施：
 
-- **指令逾時** — 規劃：10 分鐘，追問：5 分鐘，實作：30 分鐘，git/gh 指令：30 秒（透過 `context.WithTimeout`）
+- **指令逾時** — 規劃：30 分鐘，追問：30 分鐘，實作：60 分鐘，git/gh 指令：30 秒（透過 `context.WithTimeout`）
 - **並行限制** — 最多同時處理 3 個任務（可透過 `MAX_CONCURRENT` 設定）；超出時丟棄並記錄警告
+- **事件去重** — 每個 webhook 投遞透過 `X-GitHub-Delivery` UUID 追蹤；重複事件會被靜默跳過（快取每小時自動清理）
 - **錯誤清洗** — 發布到 GitHub 的錯誤留言會截斷至 500 字元，含有敏感關鍵字（`token`、`key`、`secret`、`password`、`credential`）的行會被移除，絕對路徑會被遮蔽
 - **過濾式 git add** — 符合危險模式的檔案（`.env*`、`*.pem`、`*.key`、`*credential*`、`*secret*`、`*token*`、`node_modules/`、`.git/`）永遠不會被暫存或提交
 - **Worktree 隔離** — 所有實作都在獨立的 git worktree 中執行，不影響主要 checkout
