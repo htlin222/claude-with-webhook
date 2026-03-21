@@ -351,7 +351,7 @@ func TestClassifyComment(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := classifyComment(tt.cfg, tt.sender, tt.senderType, tt.body)
+			got := classifyComment(tt.cfg, "test/repo", tt.sender, tt.senderType, tt.body)
 			if got != tt.expected {
 				t.Errorf("classifyComment() = %q, want %q", got, tt.expected)
 			}
@@ -380,7 +380,7 @@ func TestExactApproveMatching(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.body, func(t *testing.T) {
-			got := classifyComment(cfg, "alice", "User", tt.body)
+			got := classifyComment(cfg, "test/repo", "alice", "User", tt.body)
 			if got != tt.expected {
 				t.Errorf("classifyComment(%q) = %q, want %q", tt.body, got, tt.expected)
 			}

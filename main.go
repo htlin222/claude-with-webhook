@@ -55,6 +55,36 @@ func (c *Config) ReloadRepos() {
 	}
 }
 
+// isUserAllowed checks if a user is allowed to trigger automation.
+// Fast path: check the AllowedUsers map from .env.
+// Fallback: query GitHub API to see if the user has write+ permission on the repo.
+func (c *Config) isUserAllowed(repo, username string) bool {
+	if c.AllowedUsers[username] {
+		return true
+	}
+
+	// Fallback: check GitHub collaborator permission (write, maintain, or admin).
+	repoDir, ok := c.GetRepo(repo)
+	if !ok {
+		return false
+	}
+	output, err := runCmd(repoDir, gitTimeout, "gh", "api",
+		fmt.Sprintf("repos/%s/collaborators/%s/permission", repo, username),
+		"--jq", ".permission")
+	if err != nil {
+		log.Printf("[%s] failed to check permission for %s: %v", repo, username, err)
+		return false // fail-closed
+	}
+	perm := strings.TrimSpace(output)
+	switch perm {
+	case "admin", "maintain", "write":
+		log.Printf("[%s] user %s allowed via GitHub permission: %s", repo, username, perm)
+		return true
+	default:
+		return false
+	}
+}
+
 // AllRepos returns a snapshot of the current repo map.
 func (c *Config) AllRepos() map[string]string {
 	c.reposMu.RLock()
@@ -450,7 +480,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, cfg *Config, repoFrom
 
 func handleIssueOpened(cfg *Config, repo, repoDir string, num int, p webhookPayload) {
 	sender := p.Issue.User.Login
-	if !cfg.AllowedUsers[sender] {
+	if !cfg.isUserAllowed(repo, sender) {
 		log.Printf("ignoring issue #%d from non-allowed user %s", num, sender)
 		return
 	}
@@ -502,7 +532,7 @@ func runPlan(repo, repoDir string, num int, title, issueBody string) {
 // Returns: "skip-bot", "skip-self", "skip-user", "skip-no-prefix",
 //
 //	"skip-bare-mention", "approve", "plan", "followup"
-func classifyComment(cfg *Config, sender, senderType, body string) string {
+func classifyComment(cfg *Config, repo, sender, senderType, body string) string {
 	if senderType == "Bot" {
 		return "skip-bot"
 	}
@@ -511,7 +541,7 @@ func classifyComment(cfg *Config, sender, senderType, body string) string {
 		return "skip-self"
 	}
 
-	if !cfg.AllowedUsers[sender] {
+	if !cfg.isUserAllowed(repo, sender) {
 		return "skip-user"
 	}
 
@@ -542,7 +572,7 @@ func classifyComment(cfg *Config, sender, senderType, body string) string {
 func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPayload) {
 	log.Printf("[%s#%d] comment from %s (type: %s): %s", repo, num, p.Comment.User.Login, p.Sender.Type, truncateLog(p.Comment.Body, 5))
 
-	action := classifyComment(cfg, p.Comment.User.Login, p.Sender.Type, p.Comment.Body)
+	action := classifyComment(cfg, repo, p.Comment.User.Login, p.Sender.Type, p.Comment.Body)
 	switch action {
 	case "skip-bot":
 		log.Printf("[%s#%d] skipping bot comment", repo, num)

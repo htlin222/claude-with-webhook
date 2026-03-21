@@ -190,7 +190,7 @@ Worktrees 建立在各 repo 內部：
 | 變數 | 說明 |
 |------|------|
 | `GITHUB_WEBHOOK_SECRET` | 所有 repo webhook 共用的密鑰 |
-| `ALLOWED_USERS` | 允許觸發自動化的 GitHub 使用者名稱（以逗號分隔） |
+| `ALLOWED_USERS` | 永遠允許觸發自動化的 GitHub 使用者名稱（選填 — 擁有 write+ 權限的 repo 協作者會自動允許） |
 | `BOT_USERNAME` | 機器人的 GitHub 使用者名稱；會過濾自身留言以避免自我觸發 |
 | `PORT` | 伺服器監聽的連接埠（預設：`8080`） |
 | `MAX_CONCURRENT` | 最大同時處理任務數（預設：`3`） |
