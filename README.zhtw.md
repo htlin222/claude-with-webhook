@@ -195,6 +195,55 @@ Worktrees 建立在各 repo 內部：
 | `PORT` | 伺服器監聽的連接埠（預設：`8080`） |
 | `MAX_CONCURRENT` | 最大同時處理任務數（預設：`3`） |
 
+## 雙帳號設定（主帳號 + 機器人帳號）
+
+### 為什麼需要兩個帳號？
+
+本專案建議使用兩個獨立的 GitHub 帳號：
+
+- **主帳號** — 你的真實帳號。用來開 Issue、討論、留言 `@claude approve`。
+- **機器人帳號** — 在 VM 上認證的次要帳號。用來發布計畫、建立 PR、推送程式碼。
+
+這樣的分離帶來以下好處：
+- **清晰區分** — 你隨時能分辨哪些留言是人類、哪些是自動化
+- **避免無限迴圈** — `BOT_USERNAME` 過濾機制防止機器人觸發自己
+- **乾淨的稽核軌跡** — 機器人發的 PR 和留言在視覺上一目了然
+
+### 在 VM 上設定
+
+1. **建立機器人 GitHub 帳號**（例如 `my-team-bot`），並將它加為 repo 的協作者（需要寫入權限）
+
+2. **在 VM 上以機器人帳號認證：**
+   ```bash
+   gh auth login          # 以機器人帳號登入
+   claude                 # 認證 Claude Code（需要有效訂閱）
+   ```
+
+3. **設定 `.env`：**
+   ```bash
+   ALLOWED_USERS=your-primary-account
+   BOT_USERNAME=my-team-bot
+   ```
+
+4. **安裝並註冊：**
+   ```bash
+   make install
+   cd /path/to/repo && ~/.claude-webhook/register
+   ```
+
+### 流程示意
+
+```
+主帳號（你）──→ 開 Issue / 留言 "@claude approve"
+                    │
+                    ▼（webhook）
+VM（以機器人帳號認證）──→ claude-webhook-server
+                    │
+                    ├─ Claude Code 產生計畫
+                    ├─ 機器人帳號發布計畫留言
+                    └─ 機器人帳號開啟 PR 實作變更
+```
+
 ## 安全性
 
 伺服器包含多項安全強化措施：
