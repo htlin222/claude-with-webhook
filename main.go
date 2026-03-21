@@ -161,6 +161,25 @@ type streamResult struct {
 	NumTurns     int
 }
 
+// systemPrompt provides non-interactive guard rails for claude -p.
+// It prevents stalling, asking questions, and ensures deterministic behavior.
+const systemPrompt = `## System Instructions (NON-INTERACTIVE MODE)
+
+You are running in a fully non-interactive CI/CD pipeline via "claude -p --dangerously-skip-permissions".
+There is NO human to answer questions. You MUST follow these rules:
+
+1. NEVER ask clarifying questions — make your best judgment and proceed.
+2. NEVER pause or wait for input — complete the task fully in one pass.
+3. NEVER suggest manual steps — do everything yourself.
+4. If something is ambiguous, choose the most reasonable interpretation and proceed.
+5. If you encounter an error, try to fix it yourself. If you truly cannot proceed, explain why clearly.
+6. Keep your final text response concise and focused on what you did or found.
+7. You are working inside an isolated git worktree — you can freely modify files.
+8. Do NOT run "git push" or create PRs — the caller handles that.
+9. Do NOT commit changes — the caller handles git add/commit/push.
+10. Write clean, production-quality code following existing project conventions.
+`
+
 const (
 	planTimeout      = 30 * time.Minute
 	followUpTimeout  = 30 * time.Minute
@@ -514,7 +533,7 @@ func runPlan(repo, repoDir string, num int, title, issueBody string) {
 
 	updateComment, _ := postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Planning…\n\n%s", spinnerImg))
 
-	prompt := fmt.Sprintf("Plan how to implement the following GitHub issue.\n\nTitle: %s\n\nBody:\n%s", title, issueBody)
+	prompt := fmt.Sprintf("## Task: Plan Implementation\n\nAnalyze the GitHub issue below and produce a clear, actionable implementation plan. Include:\n- Files to create or modify\n- Key changes in each file\n- Edge cases to handle\n- Testing approach\n\nDo NOT implement — only plan.\n\n### Issue Title\n%s\n\n### Issue Body\n%s", title, issueBody)
 	log.Printf("[%s#%d] claude started: planning", repo, num)
 	result, err := runClaudeStreaming(repoDir, planTimeout, func(partial string) {
 		updateComment(progressBody("Planning", partial))
@@ -656,7 +675,7 @@ func handleFollowUp(cfg *Config, repo, repoDir string, num int, p webhookPayload
 		return
 	}
 
-	prompt := fmt.Sprintf("You are helping with a GitHub issue. Read the full discussion below, including the original issue and all comments. The latest comment is a follow-up question or request directed at you. Respond helpfully.\n\n%s", discussion)
+	prompt := fmt.Sprintf("## Task: Respond to Follow-Up\n\nRead the full GitHub issue discussion below (original issue + all comments). The latest comment is a follow-up question or request directed at you.\n\nRespond concisely and helpfully. If the question asks about code, reference specific files and line numbers. If it asks for changes, explain what you would do.\n\n### Discussion\n%s", discussion)
 	log.Printf("[%s#%d] claude started: follow-up", repo, num)
 	result, err := runClaudeStreaming(repoDir, followUpTimeout, func(partial string) {
 		updateComment(progressBody("Thinking", partial))
@@ -706,9 +725,9 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 		return
 	}
 
-	prompt := fmt.Sprintf("Implement the following GitHub issue. Read the full discussion below carefully, including all comments and follow-up questions, then make all necessary code changes.\n\n%s", discussion)
+	prompt := fmt.Sprintf("## Task: Implement GitHub Issue\n\nRead the full discussion below carefully (issue + all comments), then implement ALL necessary code changes.\n\nRequirements:\n- Read existing code before modifying it\n- Follow the project's existing code style and conventions\n- Handle edge cases mentioned in the discussion\n- Make the minimal set of changes needed to fully resolve the issue\n- Ensure the code compiles/runs correctly\n\n### Discussion\n%s", discussion)
 	if extraGuidance != "" {
-		prompt += fmt.Sprintf("\n\n## Additional Guidance from Approver\n\nPay special attention to the following instruction — it takes priority over general discussion:\n\n%s", extraGuidance)
+		prompt += fmt.Sprintf("\n\n## Additional Guidance from Approver (HIGH PRIORITY)\n\nThe following instruction takes priority over general discussion. Follow it precisely:\n\n%s", extraGuidance)
 	}
 	log.Printf("[%s#%d] claude started: implementing", repo, num)
 	result, err := runClaudeStreaming(worktreeDir, implementTimeout, func(partial string) {
@@ -814,9 +833,9 @@ func handlePRComment(cfg *Config, repo, repoDir string, num int, p webhookPayloa
 		return
 	}
 
-	prompt := fmt.Sprintf("You are working on a pull request. Read the full PR discussion below, including the description and all comments. The latest comment is a request directed at you. Implement the requested changes.\n\n%s", discussion)
+	prompt := fmt.Sprintf("## Task: Implement PR Changes\n\nRead the full PR discussion below (description + all comments). The latest comment is a request directed at you.\n\nRequirements:\n- Read existing code before modifying it\n- Follow the project's existing code style and conventions\n- Make only the changes requested in the latest comment\n- Ensure the code compiles/runs correctly\n\n### PR Discussion\n%s", discussion)
 	if extraGuidance != "" {
-		prompt += fmt.Sprintf("\n\n## Additional Guidance\n\nPay special attention to the following instruction:\n\n%s", extraGuidance)
+		prompt += fmt.Sprintf("\n\n## Additional Guidance (HIGH PRIORITY)\n\nThe following instruction takes priority. Follow it precisely:\n\n%s", extraGuidance)
 	}
 
 	log.Printf("[%s#%d] claude started: PR implementation", repo, num)
@@ -933,7 +952,12 @@ func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(partial
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "claude", "-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions", prompt)
+	cmd := exec.CommandContext(ctx, "claude", "-p",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--dangerously-skip-permissions",
+		"--append-system-prompt", systemPrompt,
+		prompt)
 	cmd.Dir = dir
 
 	stdout, err := cmd.StdoutPipe()
