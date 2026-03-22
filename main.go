@@ -171,8 +171,13 @@ There is NO human to answer questions. You MUST follow these rules:
 ### Critical: You MUST make actual file changes
 - Use the Edit tool or Write tool to ACTUALLY MODIFY FILES on disk.
 - Do NOT just describe or explain what changes should be made — MAKE the changes.
-- After making changes, verify them by reading the modified files.
 - If the task requires code changes, there MUST be modified files when you are done.
+
+### Workflow: Read → Modify → Verify
+Follow this exact workflow for every implementation task:
+1. READ: Use Read, Glob, and Grep tools to understand the codebase structure and relevant files.
+2. MODIFY: Use Edit tool (for existing files) or Write tool (for new files) to make all changes.
+3. VERIFY: Run "git diff" via the Bash tool to confirm your changes are on disk. If git diff shows NO output, your edits were NOT saved — you must try again.
 
 ### Behavioral rules
 1. NEVER ask clarifying questions — make your best judgment and proceed.
@@ -666,6 +671,101 @@ func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPay
 	}
 }
 
+// isBotNoise returns true if a bot comment is noise (progress, errors, spinners)
+// rather than useful context (e.g. Claude's Plan).
+func isBotNoise(body string) bool {
+	// Keep plan comments — they contain useful analysis.
+	if strings.Contains(body, "## Claude's Plan") {
+		return false
+	}
+	// Filter out progress spinners, retries, errors, and empty-result messages.
+	noiseMarkers := []string{
+		"🤖",
+		"spinner.svg",
+		"No changes were made",
+		"Nothing to commit",
+		"Claude implementation failed",
+		"Claude retry failed",
+		"Failed to ",
+		"were filtered out by security policy",
+	}
+	for _, marker := range noiseMarkers {
+		if strings.Contains(body, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// ghComment represents a GitHub issue/PR comment from the API.
+type ghComment struct {
+	User struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"created_at"`
+}
+
+// fetchDiscussion fetches an issue or PR body + comments, filtering out bot noise.
+// kind is "issue" or "pr". Bot comments that are just progress/error noise are removed,
+// but plan comments are kept.
+func fetchDiscussion(repoDir, repo string, num int, kind string, botUsername string) (string, error) {
+	numStr := strconv.Itoa(num)
+
+	// Get title + body via gh CLI (works for both issues and PRs).
+	var titleBody string
+	var err error
+	if kind == "pr" {
+		titleBody, err = runCmd(repoDir, gitTimeout, "gh", "pr", "view", numStr,
+			"--repo", repo, "--json", "title,body",
+			"--jq", `"# " + .title + "\n\n" + (.body // "")`)
+	} else {
+		titleBody, err = runCmd(repoDir, gitTimeout, "gh", "issue", "view", numStr,
+			"--repo", repo, "--json", "title,body",
+			"--jq", `"# " + .title + "\n\n" + (.body // "")`)
+	}
+	if err != nil {
+		return "", fmt.Errorf("fetch %s title/body: %w", kind, err)
+	}
+
+	// Get comments via API (issues API works for both issues and PRs).
+	commentsRaw, err := runCmd(repoDir, gitTimeout, "gh", "api",
+		fmt.Sprintf("repos/%s/issues/%d/comments", repo, num),
+		"--paginate")
+	if err != nil {
+		// Fallback to unfiltered gh view if API fails.
+		log.Printf("fetchDiscussion: API fallback for %s #%d: %v", repo, num, err)
+		if kind == "pr" {
+			return runCmd(repoDir, gitTimeout, "gh", "pr", "view", numStr, "--repo", repo, "--comments")
+		}
+		return runCmd(repoDir, gitTimeout, "gh", "issue", "view", numStr, "--repo", repo, "--comments")
+	}
+
+	var comments []ghComment
+	if err := json.Unmarshal([]byte(commentsRaw), &comments); err != nil {
+		log.Printf("fetchDiscussion: JSON parse fallback for %s #%d: %v", repo, num, err)
+		if kind == "pr" {
+			return runCmd(repoDir, gitTimeout, "gh", "pr", "view", numStr, "--repo", repo, "--comments")
+		}
+		return runCmd(repoDir, gitTimeout, "gh", "issue", "view", numStr, "--repo", repo, "--comments")
+	}
+
+	var filtered []string
+	for _, c := range comments {
+		// Filter bot noise but keep useful bot comments (like plans).
+		if botUsername != "" && strings.EqualFold(c.User.Login, botUsername) && isBotNoise(c.Body) {
+			continue
+		}
+		filtered = append(filtered, fmt.Sprintf("### Comment by %s (%s)\n\n%s", c.User.Login, c.CreatedAt, c.Body))
+	}
+
+	result := strings.TrimSpace(titleBody)
+	if len(filtered) > 0 {
+		result += "\n\n---\n\n## Comments\n\n" + strings.Join(filtered, "\n\n---\n\n")
+	}
+	return result, nil
+}
+
 // truncateLog returns the last N lines of s for compact logging.
 func truncateLog(s string, maxLines int) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
@@ -681,7 +781,7 @@ func handleFollowUp(cfg *Config, repo, repoDir string, num int, p webhookPayload
 
 	updateComment, _ := postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Thinking…\n\n%s", spinnerImg))
 
-	discussion, err := runCmd(repoDir, gitTimeout, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--comments")
+	discussion, err := fetchDiscussion(repoDir, repo, num, "issue", cfg.BotUsername)
 	if err != nil {
 		updateComment(formatError("Failed to read issue discussion", err))
 		return
@@ -698,6 +798,59 @@ func handleFollowUp(cfg *Config, repo, repoDir string, num int, p webhookPayload
 	}
 
 	updateComment(result.Text + formatMetadataFooter(result))
+}
+
+// retryIfNoChanges checks git status and retries claude once if no changes were made.
+// It includes the first attempt's text output as diagnostic context so Claude doesn't
+// re-analyze the codebase from scratch. Returns the final git status porcelain output.
+func retryIfNoChanges(repo string, num int, worktreeDir, prompt string, firstResult *streamResult, onUpdate func(string)) (string, error) {
+	status, err := runCmd(worktreeDir, gitTimeout, "git", "status", "--porcelain")
+	if err != nil {
+		return "", fmt.Errorf("git status: %w", err)
+	}
+	if strings.TrimSpace(status) != "" {
+		return status, nil // changes exist
+	}
+
+	log.Printf("[%s#%d] no changes after first attempt, retrying with diagnostic context", repo, num)
+
+	var retryPrompt strings.Builder
+	retryPrompt.WriteString("## CRITICAL: Your previous attempt produced ZERO file changes.\n\n")
+	retryPrompt.WriteString("### What went wrong\n")
+	retryPrompt.WriteString("You likely described changes in text instead of using Edit/Write tools to modify files on disk.\n\n")
+	retryPrompt.WriteString("### What you must do NOW\n")
+	retryPrompt.WriteString("1. Use the Edit tool to modify existing files, or Write tool to create new files.\n")
+	retryPrompt.WriteString("2. Do NOT explain or describe — just make the changes.\n")
+	retryPrompt.WriteString("3. After editing, run `git diff` to confirm your changes are on disk.\n\n")
+
+	// Include first attempt's analysis so Claude doesn't re-read everything.
+	if firstResult != nil && firstResult.Text != "" {
+		text := firstResult.Text
+		if len(text) > 2000 {
+			text = text[:2000] + "\n...(truncated)"
+		}
+		retryPrompt.WriteString("### Your previous analysis (reuse this — do NOT re-analyze)\n```\n")
+		retryPrompt.WriteString(text)
+		retryPrompt.WriteString("\n```\n\n")
+	}
+
+	retryPrompt.WriteString("### Original task\n")
+	retryPrompt.WriteString(prompt)
+
+	onUpdate(progressBody("Retrying (no changes detected)", ""))
+	retryResult, err := runClaudeStreaming(worktreeDir, implementTimeout, func(partial string) {
+		onUpdate(progressBody("Retrying", partial))
+	}, retryPrompt.String())
+	if err != nil {
+		return "", fmt.Errorf("claude retry: %w", err)
+	}
+	_ = retryResult
+
+	status, err = runCmd(worktreeDir, gitTimeout, "git", "status", "--porcelain")
+	if err != nil {
+		return "", fmt.Errorf("git status after retry: %w", err)
+	}
+	return status, nil
 }
 
 func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload, extraGuidance string) {
@@ -731,7 +884,7 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 		}
 	}()
 
-	discussion, err := runCmd(repoDir, gitTimeout, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--comments")
+	discussion, err := fetchDiscussion(repoDir, repo, num, "issue", cfg.BotUsername)
 	if err != nil {
 		updateComment(formatError("Failed to read issue discussion", err))
 		return
@@ -749,35 +902,12 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 		updateComment(formatError("Claude implementation failed", err))
 		return
 	}
-	_ = result // implementation uses git status for results, not claude output
 
-	status, err := runCmd(worktreeDir, gitTimeout, "git", "status", "--porcelain")
+	status, err := retryIfNoChanges(repo, num, worktreeDir, prompt, result, func(s string) { updateComment(s) })
 	if err != nil {
-		updateComment(formatError("Failed to check git status", err))
+		updateComment(formatError("Implementation failed", err))
 		return
 	}
-
-	// Retry once if no changes were made — Claude may have only described changes.
-	if strings.TrimSpace(status) == "" {
-		log.Printf("[%s#%d] no changes after first attempt, retrying with explicit instruction", repo, num)
-		retryPrompt := fmt.Sprintf("## IMPORTANT: Your previous attempt produced NO file changes.\n\nYou MUST use the Edit or Write tools to actually modify files on disk. Do NOT just describe changes — make them.\n\nOriginal task:\n%s", prompt)
-		updateComment(progressBody("Retrying (no changes detected)", ""))
-		result, err = runClaudeStreaming(worktreeDir, implementTimeout, func(partial string) {
-			updateComment(progressBody("Retrying", partial))
-		}, retryPrompt)
-		if err != nil {
-			updateComment(formatError("Claude retry failed", err))
-			return
-		}
-		_ = result
-
-		status, err = runCmd(worktreeDir, gitTimeout, "git", "status", "--porcelain")
-		if err != nil {
-			updateComment(formatError("Failed to check git status after retry", err))
-			return
-		}
-	}
-
 	if strings.TrimSpace(status) == "" {
 		updateComment("No changes were made by Claude after 2 attempts. Nothing to commit.")
 		return
@@ -860,8 +990,8 @@ func handlePRComment(cfg *Config, repo, repoDir string, num int, p webhookPayloa
 		runCmd(repoDir, gitTimeout, "git", "worktree", "remove", "--force", worktreeDir)
 	}()
 
-	// Read the full PR discussion.
-	discussion, err := runCmd(repoDir, gitTimeout, "gh", "pr", "view", strconv.Itoa(num), "--repo", repo, "--comments")
+	// Read the full PR discussion, filtering out bot noise.
+	discussion, err := fetchDiscussion(repoDir, repo, num, "pr", cfg.BotUsername)
 	if err != nil {
 		updateComment(formatError("Failed to read PR discussion", err))
 		return
@@ -880,36 +1010,12 @@ func handlePRComment(cfg *Config, repo, repoDir string, num int, p webhookPayloa
 		updateComment(formatError("Claude implementation failed", err))
 		return
 	}
-	_ = result
 
-	// Check for changes, commit, and push.
-	status, err := runCmd(worktreeDir, gitTimeout, "git", "status", "--porcelain")
+	status, err := retryIfNoChanges(repo, num, worktreeDir, prompt, result, func(s string) { updateComment(s) })
 	if err != nil {
-		updateComment(formatError("Failed to check git status", err))
+		updateComment(formatError("Implementation failed", err))
 		return
 	}
-
-	// Retry once if no changes were made.
-	if strings.TrimSpace(status) == "" {
-		log.Printf("[%s#%d] no changes after first attempt, retrying with explicit instruction", repo, num)
-		retryPrompt := fmt.Sprintf("## IMPORTANT: Your previous attempt produced NO file changes.\n\nYou MUST use the Edit or Write tools to actually modify files on disk. Do NOT just describe changes — make them.\n\nOriginal task:\n%s", prompt)
-		updateComment(progressBody("Retrying (no changes detected)", ""))
-		result, err = runClaudeStreaming(worktreeDir, implementTimeout, func(partial string) {
-			updateComment(progressBody("Retrying", partial))
-		}, retryPrompt)
-		if err != nil {
-			updateComment(formatError("Claude retry failed", err))
-			return
-		}
-		_ = result
-
-		status, err = runCmd(worktreeDir, gitTimeout, "git", "status", "--porcelain")
-		if err != nil {
-			updateComment(formatError("Failed to check git status after retry", err))
-			return
-		}
-	}
-
 	if strings.TrimSpace(status) == "" {
 		updateComment("No changes were made by Claude after 2 attempts. Nothing to commit.")
 		return
