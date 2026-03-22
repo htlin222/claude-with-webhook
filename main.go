@@ -960,14 +960,18 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 	prURL = strings.TrimSpace(prURL)
 	deleteSpinner()
 
-	// Enable auto-merge if requested.
+	// Auto-merge if requested: try direct squash merge first (no CI),
+	// fall back to --auto (CI pending).
 	if autoMerge {
-		if _, err := runCmd(worktreeDir, gitTimeout, "gh", "pr", "merge", "--auto", "--squash", "--repo", repo, branch); err != nil {
-			log.Printf("[%s#%d] auto-merge failed: %v", repo, num, err)
-			postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s\n\n⚠️ Auto-merge failed: %v", prURL, err))
-		} else {
+		if _, err := runCmd(worktreeDir, gitTimeout, "gh", "pr", "merge", "--squash", "--repo", repo, branch); err == nil {
+			log.Printf("[%s#%d] PR merged directly (squash) for %s", repo, num, prURL)
+			postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created and merged: %s", prURL))
+		} else if _, err := runCmd(worktreeDir, gitTimeout, "gh", "pr", "merge", "--auto", "--squash", "--repo", repo, branch); err == nil {
 			log.Printf("[%s#%d] auto-merge enabled for %s", repo, num, prURL)
 			postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s\n\n✅ Auto-merge enabled (will merge when CI passes)", prURL))
+		} else {
+			log.Printf("[%s#%d] auto-merge failed: %v", repo, num, err)
+			postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s\n\n⚠️ Auto-merge failed — please merge manually", prURL))
 		}
 	} else {
 		postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s", prURL))
