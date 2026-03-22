@@ -560,7 +560,7 @@ func runPlan(repo, repoDir string, num int, title, issueBody string) {
 		return
 	}
 
-	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\nComment **@claude** to interact:\n\n```\n@claude approve\n@claude approve focus on error handling and add tests\n@claude approve 請用繁體中文寫註解\n@claude plan (re-generate this plan)\n@claude <follow-up question>\n```%s", result.Text, formatMetadataFooter(result))
+	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\nComment **@claude** to interact:\n\n```\n@claude approve\n@claude approve --auto-merge\n@claude approve focus on error handling and add tests\n@claude approve --auto-merge 請用繁體中文寫註解\n@claude plan (re-generate this plan)\n@claude <follow-up question>\n```%s", result.Text, formatMetadataFooter(result))
 	updateComment(body)
 }
 
@@ -633,8 +633,9 @@ func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPay
 	body := strings.TrimSpace(p.Comment.Body)
 	cmd := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(strings.SplitN(body, "\n", 2)[0]), "@claude"))
 
-	// Determine extra guidance for approve commands.
+	// Determine extra guidance and flags for approve commands.
 	extra := ""
+	autoMerge := false
 	if action == "approve" {
 		if cmd == "approve" || cmd == "approved" || cmd == "lgtm" {
 			if idx := strings.Index(body, "\n"); idx != -1 {
@@ -643,8 +644,20 @@ func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPay
 		} else {
 			extra = strings.TrimSpace(cmd[strings.Index(cmd, " ")+1:])
 		}
+		// Extract --auto-merge flag from extra guidance.
+		if strings.Contains(extra, "--auto-merge") {
+			autoMerge = true
+			extra = strings.TrimSpace(strings.ReplaceAll(extra, "--auto-merge", ""))
+		}
+		// Also check the first line for --auto-merge (e.g. "@claude approve --auto-merge").
+		if strings.Contains(cmd, "--auto-merge") {
+			autoMerge = true
+		}
 		if extra != "" {
 			log.Printf("[%s#%d] approve with extra guidance: %s", repo, num, truncateLog(extra, 3))
+		}
+		if autoMerge {
+			log.Printf("[%s#%d] auto-merge requested", repo, num)
 		}
 	}
 
@@ -663,7 +676,7 @@ func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPay
 
 	switch action {
 	case "approve":
-		handleApprove(cfg, repo, repoDir, num, p, extra)
+		handleApprove(cfg, repo, repoDir, num, p, extra, autoMerge)
 	case "plan":
 		handlePlan(cfg, repo, repoDir, num, p)
 	case "followup":
@@ -853,7 +866,7 @@ func retryIfNoChanges(repo string, num int, worktreeDir, prompt string, firstRes
 	return status, nil
 }
 
-func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload, extraGuidance string) {
+func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload, extraGuidance string, autoMerge bool) {
 	log.Printf("[%s] implementing issue #%d", repo, num)
 
 	branch := fmt.Sprintf("issue-%d", num)
@@ -946,7 +959,19 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 
 	prURL = strings.TrimSpace(prURL)
 	deleteSpinner()
-	postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s", prURL))
+
+	// Enable auto-merge if requested.
+	if autoMerge {
+		if _, err := runCmd(worktreeDir, gitTimeout, "gh", "pr", "merge", "--auto", "--squash", "--repo", repo, branch); err != nil {
+			log.Printf("[%s#%d] auto-merge failed: %v", repo, num, err)
+			postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s\n\n⚠️ Auto-merge failed: %v", prURL, err))
+		} else {
+			log.Printf("[%s#%d] auto-merge enabled for %s", repo, num, prURL)
+			postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s\n\n✅ Auto-merge enabled (will merge when CI passes)", prURL))
+		}
+	} else {
+		postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s", prURL))
+	}
 	success = true
 
 	log.Printf("[%s] PR created for issue #%d: %s", repo, num, prURL)
