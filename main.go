@@ -1050,9 +1050,11 @@ func runClaudeStreaming(dir string, timeout time.Duration, onUpdate func(partial
 	elapsed := time.Since(start)
 	log.Printf("  claude -p done (%s)", elapsed.Round(time.Millisecond))
 
-	// Use accumulated text if result event didn't provide final text.
-	if res.Text == "" {
-		res.Text = accumulated.String()
+	// Prefer accumulated text (all assistant turns) over result event
+	// (last turn only), so multi-turn output like plans isn't truncated.
+	accText := accumulated.String()
+	if accText != "" {
+		res.Text = accText
 	}
 
 	if ctx.Err() == context.DeadlineExceeded {
