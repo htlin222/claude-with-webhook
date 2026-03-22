@@ -168,16 +168,28 @@ const systemPrompt = `## System Instructions (NON-INTERACTIVE MODE)
 You are running in a fully non-interactive CI/CD pipeline via "claude -p --dangerously-skip-permissions".
 There is NO human to answer questions. You MUST follow these rules:
 
+### Critical: You MUST make actual file changes
+- Use the Edit tool or Write tool to ACTUALLY MODIFY FILES on disk.
+- Do NOT just describe or explain what changes should be made — MAKE the changes.
+- After making changes, verify them by reading the modified files.
+- If the task requires code changes, there MUST be modified files when you are done.
+
+### Behavioral rules
 1. NEVER ask clarifying questions — make your best judgment and proceed.
 2. NEVER pause or wait for input — complete the task fully in one pass.
 3. NEVER suggest manual steps — do everything yourself.
 4. If something is ambiguous, choose the most reasonable interpretation and proceed.
 5. If you encounter an error, try to fix it yourself. If you truly cannot proceed, explain why clearly.
-6. Keep your final text response concise and focused on what you did or found.
-7. You are working inside an isolated git worktree — you can freely modify files.
-8. Do NOT run "git push" or create PRs — the caller handles that.
-9. Do NOT commit changes — the caller handles git add/commit/push.
-10. Write clean, production-quality code following existing project conventions.
+6. Keep your final text response concise and focused on what you did.
+
+### Git rules (the caller handles git operations)
+7. You are working inside an isolated git worktree — freely create and modify files.
+8. Do NOT run "git commit", "git push", or create PRs — the caller handles all git operations after you finish.
+9. Do NOT run "git add" — just edit the files, the caller stages and commits them.
+
+### Quality
+10. Read existing code before modifying it — understand context first.
+11. Write clean, production-quality code following existing project conventions.
 `
 
 const (
@@ -744,8 +756,30 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 		updateComment(formatError("Failed to check git status", err))
 		return
 	}
+
+	// Retry once if no changes were made — Claude may have only described changes.
 	if strings.TrimSpace(status) == "" {
-		updateComment("No changes were made by Claude. Nothing to commit.")
+		log.Printf("[%s#%d] no changes after first attempt, retrying with explicit instruction", repo, num)
+		retryPrompt := fmt.Sprintf("## IMPORTANT: Your previous attempt produced NO file changes.\n\nYou MUST use the Edit or Write tools to actually modify files on disk. Do NOT just describe changes — make them.\n\nOriginal task:\n%s", prompt)
+		updateComment(progressBody("Retrying (no changes detected)", ""))
+		result, err = runClaudeStreaming(worktreeDir, implementTimeout, func(partial string) {
+			updateComment(progressBody("Retrying", partial))
+		}, retryPrompt)
+		if err != nil {
+			updateComment(formatError("Claude retry failed", err))
+			return
+		}
+		_ = result
+
+		status, err = runCmd(worktreeDir, gitTimeout, "git", "status", "--porcelain")
+		if err != nil {
+			updateComment(formatError("Failed to check git status after retry", err))
+			return
+		}
+	}
+
+	if strings.TrimSpace(status) == "" {
+		updateComment("No changes were made by Claude after 2 attempts. Nothing to commit.")
 		return
 	}
 
@@ -854,8 +888,30 @@ func handlePRComment(cfg *Config, repo, repoDir string, num int, p webhookPayloa
 		updateComment(formatError("Failed to check git status", err))
 		return
 	}
+
+	// Retry once if no changes were made.
 	if strings.TrimSpace(status) == "" {
-		updateComment("No changes were made by Claude. Nothing to commit.")
+		log.Printf("[%s#%d] no changes after first attempt, retrying with explicit instruction", repo, num)
+		retryPrompt := fmt.Sprintf("## IMPORTANT: Your previous attempt produced NO file changes.\n\nYou MUST use the Edit or Write tools to actually modify files on disk. Do NOT just describe changes — make them.\n\nOriginal task:\n%s", prompt)
+		updateComment(progressBody("Retrying (no changes detected)", ""))
+		result, err = runClaudeStreaming(worktreeDir, implementTimeout, func(partial string) {
+			updateComment(progressBody("Retrying", partial))
+		}, retryPrompt)
+		if err != nil {
+			updateComment(formatError("Claude retry failed", err))
+			return
+		}
+		_ = result
+
+		status, err = runCmd(worktreeDir, gitTimeout, "git", "status", "--porcelain")
+		if err != nil {
+			updateComment(formatError("Failed to check git status after retry", err))
+			return
+		}
+	}
+
+	if strings.TrimSpace(status) == "" {
+		updateComment("No changes were made by Claude after 2 attempts. Nothing to commit.")
 		return
 	}
 
