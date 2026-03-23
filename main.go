@@ -560,7 +560,13 @@ func runPlan(repo, repoDir string, num int, title, issueBody string) {
 		return
 	}
 
-	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\nComment **@claude** to interact:\n\n```\n@claude approve\n@claude approve --auto-merge\n@claude approve focus on error handling and add tests\n@claude approve --auto-merge 請用繁體中文寫註解\n@claude plan (re-generate this plan)\n@claude <follow-up question>\n```%s", result.Text, formatMetadataFooter(result))
+	// Clean up Claude's output: strip any preamble text before the actual plan content.
+	planText := result.Text
+	if idx := strings.Index(planText, "## "); idx > 0 {
+		planText = planText[idx:]
+	}
+
+	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\nComment **@claude** to interact:\n\n```\n@claude approve\n@claude approve --auto-merge\n@claude approve focus on error handling and add tests\n@claude approve --auto-merge 請用繁體中文寫註解\n@claude plan (re-generate this plan)\n@claude <follow-up question>\n```%s", planText, formatMetadataFooter(result))
 	updateComment(body)
 }
 
