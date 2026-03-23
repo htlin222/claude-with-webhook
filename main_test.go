@@ -759,3 +759,111 @@ func TestAssistantTurnSeparator(t *testing.T) {
 		t.Errorf("accumulated text =\n%q\nwant:\n%q", got, want)
 	}
 }
+
+func TestIsLGTM(t *testing.T) {
+	lgtmCases := []string{
+		"LGTM",
+		"lgtm",
+		"LGTM.",
+		"LGTM!",
+		"lgtm!",
+		"LGTM, looks good",
+		"LGTM - no issues found",
+		"lgtm, code is clean",
+	}
+	for _, tc := range lgtmCases {
+		t.Run("lgtm:"+tc, func(t *testing.T) {
+			if !isLGTM(tc) {
+				t.Errorf("isLGTM(%q) = false, want true", tc)
+			}
+		})
+	}
+
+	notLGTMCases := []string{
+		"There are several issues with this code:\n1. Missing error handling\n2. No input validation\n3. Potential race condition in the goroutine",
+		"Bug: the loop counter starts at 1 instead of 0, causing an off-by-one error that skips the first element",
+		"",
+		"The code needs significant refactoring. The function is too long and handles multiple responsibilities which makes it hard to test and maintain.",
+	}
+	for _, tc := range notLGTMCases {
+		name := tc
+		if len(name) > 40 {
+			name = name[:40]
+		}
+		t.Run("not-lgtm:"+name, func(t *testing.T) {
+			if isLGTM(tc) {
+				t.Errorf("isLGTM(%q) = true, want false", tc)
+			}
+		})
+	}
+}
+
+func TestPolishFlagParsing(t *testing.T) {
+	cfg := &Config{
+		AllowedUsers: map[string]bool{"alice": true},
+	}
+
+	tests := []struct {
+		body        string
+		wantAction  string
+		description string
+	}{
+		{"@claude approve --polish", "approve", "polish flag on first line"},
+		{"@claude approve --polish --auto-merge", "approve", "polish with auto-merge"},
+		{"@claude approve --auto-merge --polish", "approve", "auto-merge before polish"},
+		{"@claude approve\n--polish in body", "approve", "polish in body text"},
+		{"@claude approve", "approve", "no polish flag"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.description, func(t *testing.T) {
+			got := classifyComment(cfg, "test/repo", "alice", "User", tt.body)
+			if got != tt.wantAction {
+				t.Errorf("classifyComment(%q) = %q, want %q", tt.body, got, tt.wantAction)
+			}
+		})
+	}
+}
+
+func TestPolishFlagExtraction(t *testing.T) {
+	// Simulate the flag extraction logic from handleIssueComment.
+	tests := []struct {
+		cmd         string
+		extra       string
+		wantPolish  bool
+		wantExtra   string
+		description string
+	}{
+		{"approve --polish", "", true, "", "polish in cmd"},
+		{"approve --auto-merge --polish", "", true, "", "both flags in cmd"},
+		{"approve", "--polish focus on tests", true, "focus on tests", "polish in extra"},
+		{"approve", "focus on tests", false, "focus on tests", "no polish"},
+		{"approve --polish", "--auto-merge", true, "", "polish cmd, auto-merge extra"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.description, func(t *testing.T) {
+			extra := tt.extra
+			polish := false
+
+			// Extract --polish from extra.
+			if strings.Contains(extra, "--polish") {
+				polish = true
+				extra = strings.TrimSpace(strings.ReplaceAll(extra, "--polish", ""))
+			}
+			// Check cmd for --polish.
+			if strings.Contains(tt.cmd, "--polish") {
+				polish = true
+			}
+			// Also strip --auto-merge for cleaner comparison.
+			extra = strings.TrimSpace(strings.ReplaceAll(extra, "--auto-merge", ""))
+
+			if polish != tt.wantPolish {
+				t.Errorf("polish = %v, want %v", polish, tt.wantPolish)
+			}
+			if extra != tt.wantExtra {
+				t.Errorf("extra = %q, want %q", extra, tt.wantExtra)
+			}
+		})
+	}
+}

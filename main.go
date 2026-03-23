@@ -201,8 +201,10 @@ const (
 	planTimeout      = 30 * time.Minute
 	followUpTimeout  = 30 * time.Minute
 	implementTimeout = 60 * time.Minute
+	polishTimeout    = 30 * time.Minute
 	gitTimeout       = 30 * time.Second
 	maxErrorLen      = 500
+	maxDiffLen       = 10000 // max chars of diff to include in review prompt
 
 	spinnerImg = `<div align="center">
 
@@ -642,6 +644,7 @@ func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPay
 	// Determine extra guidance and flags for approve commands.
 	extra := ""
 	autoMerge := false
+	polish := false
 	if action == "approve" {
 		if cmd == "approve" || cmd == "approved" || cmd == "lgtm" {
 			if idx := strings.Index(body, "\n"); idx != -1 {
@@ -659,11 +662,23 @@ func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPay
 		if strings.Contains(cmd, "--auto-merge") {
 			autoMerge = true
 		}
+		// Extract --polish flag from extra guidance.
+		if strings.Contains(extra, "--polish") {
+			polish = true
+			extra = strings.TrimSpace(strings.ReplaceAll(extra, "--polish", ""))
+		}
+		// Also check the first line for --polish (e.g. "@claude approve --polish").
+		if strings.Contains(cmd, "--polish") {
+			polish = true
+		}
 		if extra != "" {
 			log.Printf("[%s#%d] approve with extra guidance: %s", repo, num, truncateLog(extra, 3))
 		}
 		if autoMerge {
 			log.Printf("[%s#%d] auto-merge requested", repo, num)
+		}
+		if polish {
+			log.Printf("[%s#%d] polish requested", repo, num)
 		}
 	}
 
@@ -682,7 +697,7 @@ func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPay
 
 	switch action {
 	case "approve":
-		handleApprove(cfg, repo, repoDir, num, p, extra, autoMerge)
+		handleApprove(cfg, repo, repoDir, num, p, extra, autoMerge, polish)
 	case "plan":
 		handlePlan(cfg, repo, repoDir, num, p)
 	case "followup":
@@ -872,7 +887,7 @@ func retryIfNoChanges(repo string, num int, worktreeDir, prompt string, firstRes
 	return status, nil
 }
 
-func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload, extraGuidance string, autoMerge bool) {
+func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload, extraGuidance string, autoMerge bool, polish bool) {
 	log.Printf("[%s] implementing issue #%d", repo, num)
 
 	branch := fmt.Sprintf("issue-%d", num)
@@ -932,6 +947,11 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 		return
 	}
 
+	// Multi-agent polish: review the diff then refine if needed.
+	if polish {
+		runPolish(repo, num, worktreeDir, func(s string) { updateComment(s) })
+	}
+
 	title := p.Issue.Title
 	commitMsg := fmt.Sprintf("Implement #%d: %s", num, title)
 
@@ -985,6 +1005,131 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 	success = true
 
 	log.Printf("[%s] PR created for issue #%d: %s", repo, num, prURL)
+}
+
+// runPolish runs the two-agent review→refine loop on the current diff.
+// All errors are non-fatal — if anything fails, we log and continue with the unpolished code.
+func runPolish(repo string, num int, worktreeDir string, onUpdate func(string)) {
+	log.Printf("[%s#%d] starting polish: review phase", repo, num)
+
+	reviewText, err := runReview(repo, num, worktreeDir, onUpdate)
+	if err != nil {
+		log.Printf("[%s#%d] polish review failed (non-fatal): %v", repo, num, err)
+		return
+	}
+
+	// If the reviewer says LGTM (no issues found), skip refine.
+	if isLGTM(reviewText) {
+		log.Printf("[%s#%d] polish review: LGTM — skipping refine", repo, num)
+		return
+	}
+
+	log.Printf("[%s#%d] starting polish: refine phase", repo, num)
+	if err := runRefine(repo, num, worktreeDir, reviewText, onUpdate); err != nil {
+		log.Printf("[%s#%d] polish refine failed (non-fatal): %v", repo, num, err)
+	}
+}
+
+// runReview runs a Claude call that reviews the current git diff and returns critique text.
+// It acts as the "Gunshi" (strategist) agent — instructed to review only, not modify files.
+func runReview(repo string, num int, worktreeDir string, onUpdate func(string)) (string, error) {
+	diff, err := runCmd(worktreeDir, gitTimeout, "git", "diff", "HEAD")
+	if err != nil {
+		// Fall back to diff of staged + unstaged changes.
+		diff, err = runCmd(worktreeDir, gitTimeout, "git", "diff")
+		if err != nil {
+			return "", fmt.Errorf("git diff: %w", err)
+		}
+	}
+
+	diff = strings.TrimSpace(diff)
+	if diff == "" {
+		// Try staged changes.
+		diff, _ = runCmd(worktreeDir, gitTimeout, "git", "diff", "--cached")
+		diff = strings.TrimSpace(diff)
+	}
+	if diff == "" {
+		return "LGTM", nil // no diff to review
+	}
+
+	// Truncate large diffs to leave room for analysis.
+	if len(diff) > maxDiffLen {
+		diff = diff[:maxDiffLen] + "\n... (truncated)"
+	}
+
+	prompt := fmt.Sprintf(`## Task: Code Review (Review Only — Do NOT Modify Files)
+
+You are a senior code reviewer (Gunshi/strategist). Review the following git diff for:
+- Bugs, logic errors, or edge cases
+- Security issues
+- Style inconsistencies with the surrounding codebase
+- Missing error handling
+- Performance concerns
+
+### Rules
+- Do NOT use Edit, Write, or any file-modifying tools. You are a REVIEWER only.
+- Output your review as plain text.
+- If the code looks good and you have no substantive feedback, respond with exactly: LGTM
+- Be concise — focus on actionable issues, not nitpicks.
+
+### Git Diff
+%s`, "```diff\n"+diff+"\n```")
+
+	onUpdate(progressBody("Polishing (reviewing)", ""))
+	result, err := runClaudeStreaming(worktreeDir, polishTimeout, func(partial string) {
+		onUpdate(progressBody("Polishing (reviewing)", partial))
+	}, prompt)
+	if err != nil {
+		return "", fmt.Errorf("claude review: %w", err)
+	}
+
+	log.Printf("[%s#%d] polish review complete (%d turns, $%.4f)", repo, num, result.NumTurns, result.TotalCostUSD)
+	return result.Text, nil
+}
+
+// runRefine runs a Claude call that applies the review findings as code fixes.
+func runRefine(repo string, num int, worktreeDir string, reviewText string, onUpdate func(string)) error {
+	// Truncate review if extremely long.
+	if len(reviewText) > 5000 {
+		reviewText = reviewText[:5000] + "\n... (truncated)"
+	}
+
+	prompt := fmt.Sprintf(`## Task: Apply Code Review Feedback
+
+A senior reviewer has examined your implementation and found issues. Apply their feedback by making the necessary code changes.
+
+### Rules
+- Use Edit tool to fix the issues identified below.
+- Only fix what the review calls out — do not make unrelated changes.
+- After fixing, run "git diff" to verify your changes are on disk.
+
+### Review Feedback
+%s`, reviewText)
+
+	onUpdate(progressBody("Polishing (refining)", ""))
+	result, err := runClaudeStreaming(worktreeDir, polishTimeout, func(partial string) {
+		onUpdate(progressBody("Polishing (refining)", partial))
+	}, prompt)
+	if err != nil {
+		return fmt.Errorf("claude refine: %w", err)
+	}
+
+	log.Printf("[%s#%d] polish refine complete (%d turns, $%.4f)", repo, num, result.NumTurns, result.TotalCostUSD)
+	return nil
+}
+
+// isLGTM returns true if the review text indicates no issues were found.
+func isLGTM(reviewText string) bool {
+	trimmed := strings.TrimSpace(strings.ToLower(reviewText))
+	// Exact LGTM or very short responses that indicate approval.
+	if trimmed == "lgtm" || trimmed == "lgtm." || trimmed == "lgtm!" {
+		return true
+	}
+	// Check if the response starts with LGTM and is short (a brief "LGTM, looks good" style).
+	if strings.HasPrefix(trimmed, "lgtm") && len(trimmed) < 100 {
+		return true
+	}
+	return false
 }
 
 func handlePRComment(cfg *Config, repo, repoDir string, num int, p webhookPayload, extraGuidance string) {
