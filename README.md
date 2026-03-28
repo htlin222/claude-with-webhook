@@ -1,5 +1,10 @@
 # Claude Code Webhook Server
 
+[![Stars](https://img.shields.io/github/stars/htlin222/claude-with-webhook?style=flat)](https://github.com/htlin222/claude-with-webhook/stargazers)
+[![Last Commit](https://img.shields.io/github/last-commit/htlin222/claude-with-webhook)](https://github.com/htlin222/claude-with-webhook/commits/main)
+[![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 [繁體中文](README.zhtw.md)
 
 A Go server that automates Claude Code planning and implementation via GitHub issues. One server handles multiple repos, routed by URL path. When an allowed user opens an issue, Claude generates a plan. On approval, Claude implements the changes in a git worktree and opens a PR.
